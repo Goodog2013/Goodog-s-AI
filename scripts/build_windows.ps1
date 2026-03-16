@@ -2,6 +2,8 @@ param(
   [string]$FlutterExe = "",
   [string]$BuildRoot = "C:\\goodogs_ai_build",
   [switch]$SkipClean,
+  [switch]$SkipInstaller,
+  [string]$InnoCompiler = "",
   [switch]$OpenOutput
 )
 
@@ -103,10 +105,13 @@ $flutter = Resolve-FlutterExe -UserValue $FlutterExe -ProjectDir $projectDir
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $workspaceDir = Join-Path $BuildRoot "workspace_$timestamp"
 $releaseDir = Join-Path $workspaceDir "build\\windows\\x64\\runner\\Release"
-$artifactDir = Join-Path $projectDir "artifacts\\windows_release"
+$artifactBaseDir = Join-Path $projectDir "artifacts\\windows_release"
+$artifactDir = $artifactBaseDir
+$installerDir = Join-Path $projectDir "artifacts\\installer"
 
 New-Item -ItemType Directory -Force -Path $workspaceDir | Out-Null
-New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+New-Item -ItemType Directory -Force -Path $artifactBaseDir | Out-Null
+New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
 
 Write-Host "Project:   $projectDir"
 Write-Host "Flutter:   $flutter"
@@ -130,18 +135,53 @@ if (-not (Test-Path $releaseDir)) {
   throw "Release directory was not produced: $releaseDir"
 }
 
-Get-ChildItem -Path $artifactDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-Copy-Item -Path (Join-Path $releaseDir "*") -Destination $artifactDir -Recurse -Force
+try {
+  Get-ChildItem -Path $artifactDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+  Copy-Item -Path (Join-Path $releaseDir "*") -Destination $artifactDir -Recurse -Force
+}
+catch {
+  $artifactDir = Join-Path $projectDir "artifacts\\windows_release_$timestamp"
+  New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+  Copy-Item -Path (Join-Path $releaseDir "*") -Destination $artifactDir -Recurse -Force
+  Write-Warning "Could not overwrite windows_release (files are locked). Used fallback directory: $artifactDir"
+}
 
 $exePath = Join-Path $artifactDir "Goodog's AI.exe"
 if (-not (Test-Path $exePath)) {
   $exePath = Join-Path $artifactDir "goodogs_chat.exe"
 }
 
+$installerPath = ""
+if (-not $SkipInstaller) {
+  $installerScript = Join-Path $projectDir "scripts\\build_installer.ps1"
+  if (-not (Test-Path $installerScript)) {
+    throw "Installer script was not found: $installerScript"
+  }
+
+  $installerArgs = @{
+    SourceDir = $artifactDir
+    OutputDir = $installerDir
+  }
+  if ($InnoCompiler) {
+    $installerArgs["InnoCompiler"] = $InnoCompiler
+  }
+
+  $installerOutput = & $installerScript @installerArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Installer creation failed."
+  }
+  if ($installerOutput) {
+    $installerPath = $installerOutput[-1]
+  }
+}
+
 Write-Host ""
 Write-Host "Build completed successfully."
 Write-Host "Artifacts: $artifactDir"
 Write-Host "Exe:       $exePath"
+if ($installerPath) {
+  Write-Host "Installer: $installerPath"
+}
 
 if ($OpenOutput) {
   Start-Process explorer.exe $artifactDir
