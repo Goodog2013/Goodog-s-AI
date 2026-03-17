@@ -228,6 +228,9 @@ class _AdminScreenState extends State<AdminScreen> {
                       'Пока нет профилей. Они появятся после подключения клиентов.',
                     ),
                   ..._profiles.map((profile) {
+                    final account = widget.server.accountByProfileId(
+                      profile.id,
+                    );
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 10),
                       child: Container(
@@ -255,6 +258,18 @@ class _AdminScreenState extends State<AdminScreen> {
                                     'ID: ${profile.id}',
                                     style: theme.textTheme.bodySmall,
                                   ),
+                                  if (account != null) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Логин: ${account.login}',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Email: ${account.email}',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),

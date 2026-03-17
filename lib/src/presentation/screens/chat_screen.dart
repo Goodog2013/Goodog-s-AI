@@ -707,6 +707,20 @@ class _ChatScreenState extends State<ChatScreen> {
                                             color: colors.onSurfaceVariant,
                                           ),
                                     ),
+                                    if (controller.account != null) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '@${controller.account!.login}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              color: colors.onSurfaceVariant,
+                                            ),
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -717,6 +731,18 @@ class _ChatScreenState extends State<ChatScreen> {
                                 },
                                 icon: const Icon(Icons.sync_rounded),
                               ),
+                              if (controller.settings.lanGatewayEnabled)
+                                IconButton(
+                                  tooltip: 'Выйти',
+                                  onPressed: () async {
+                                    await controller.logout();
+                                    if (!mounted) {
+                                      return;
+                                    }
+                                    _showSnack('Вы вышли из аккаунта.');
+                                  },
+                                  icon: const Icon(Icons.logout_rounded),
+                                ),
                             ],
                           ),
                         ),

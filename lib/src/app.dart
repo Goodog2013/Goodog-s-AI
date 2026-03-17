@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'presentation/controllers/chat_controller.dart';
+import 'presentation/screens/auth_screen.dart';
 import 'presentation/screens/chat_screen.dart';
 import 'presentation/theme/app_theme.dart';
 
@@ -34,7 +35,9 @@ class _GoodogsChatAppState extends State<GoodogsChatApp> {
           themeMode: settings.flutterThemeMode,
           themeAnimationDuration: const Duration(milliseconds: 350),
           themeAnimationCurve: Curves.easeOutCubic,
-          home: ChatScreen(controller: widget.chatController),
+          home: widget.chatController.requiresAuthentication
+              ? AuthScreen(controller: widget.chatController)
+              : ChatScreen(controller: widget.chatController),
         );
       },
     );

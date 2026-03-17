@@ -3,6 +3,8 @@ import '../data/remote/lan_gateway_client.dart';
 import '../data/remote/lm_studio_api_client.dart';
 import '../data/remote/web_search_client.dart';
 import '../models/app_language.dart';
+import '../models/auth_account.dart';
+import '../models/auth_session.dart';
 import '../models/chat_message.dart';
 import '../models/chat_settings.dart';
 import '../models/chat_workspace.dart';
@@ -34,33 +36,85 @@ class ChatService {
     return _workspaceDataSource.saveWorkspace(workspace);
   }
 
-  Future<UserProfile> syncProfile({required ChatSettings settings}) async {
+  Future<AuthSession?> restoreAuthSession({
+    required ChatSettings settings,
+  }) async {
+    if (!settings.lanGatewayEnabled) {
+      return null;
+    }
+    try {
+      return await _lanGatewayClient.fetchAuthSession(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+      );
+    } on LanGatewayException catch (error) {
+      throw ChatApiException(error.message);
+    }
+  }
+
+  Future<AuthSession> register({
+    required ChatSettings settings,
+    required String login,
+    required String password,
+    required String email,
+    required String name,
+  }) async {
+    if (!settings.lanGatewayEnabled) {
+      throw const ChatApiException(
+        'Регистрация доступна только через LAN-шлюз.',
+      );
+    }
+    try {
+      return await _lanGatewayClient.register(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+        login: login,
+        password: password,
+        email: email,
+        name: name,
+      );
+    } on LanGatewayException catch (error) {
+      throw ChatApiException(error.message);
+    }
+  }
+
+  Future<AuthSession> login({
+    required ChatSettings settings,
+    required String login,
+    required String password,
+  }) async {
+    if (!settings.lanGatewayEnabled) {
+      throw const ChatApiException('Вход доступен только через LAN-шлюз.');
+    }
+    try {
+      return await _lanGatewayClient.login(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+        login: login,
+        password: password,
+      );
+    } on LanGatewayException catch (error) {
+      throw ChatApiException(error.message);
+    }
+  }
+
+  Future<void> logout({required ChatSettings settings}) async {
+    if (!settings.lanGatewayEnabled) {
+      return;
+    }
+    try {
+      await _lanGatewayClient.logout(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+      );
+    } on LanGatewayException catch (error) {
+      throw ChatApiException(error.message);
+    }
+  }
+
+  UserProfile localProfileFromSettings(ChatSettings settings) {
     final profileId = settings.profileId.trim();
     final profileName = settings.profileName.trim();
-    final localProfile = UserProfile.initial(
+    return UserProfile.initial(
       id: profileId.isEmpty ? 'local_user' : profileId,
       name: profileName.isEmpty ? ChatSettings.defaultProfileName : profileName,
     );
-
-    if (!settings.lanGatewayEnabled) {
-      return localProfile;
-    }
-
-    try {
-      return await _lanGatewayClient.syncProfile(
-        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
-        profileId: localProfile.id,
-        profileName: localProfile.displayName,
-      );
-    } on LanGatewayException catch (error) {
-      if (error.isCancelled) {
-        throw const ChatApiException(
-          LmStudioApiClient.cancelledByUserMessage,
-          isCancelled: true,
-        );
-      }
-      throw ChatApiException(error.message);
-    }
   }
 
   Future<AssistantReplyResult> getAssistantReply({
@@ -98,6 +152,9 @@ class ChatService {
       ChatMessage.system(
         'Always answer in $answerLanguage unless the user explicitly asks for another language.',
       ),
+      ChatMessage.system(
+        'User name is ${profile.displayName}. Address user by this name when appropriate.',
+      ),
       if (settings.webSearchEnabled)
         ChatMessage.system(_noHallucinationInstruction),
     ];
@@ -111,14 +168,15 @@ class ChatService {
 
     String firstAssistantText;
     UserProfile nextProfile = profile;
+    AuthAccount? nextAccount;
     if (settings.lanGatewayEnabled) {
       final gatewayResult = await _lanGatewayRequest(
         settings: settings,
-        profile: profile,
         messages: requestMessages,
       );
       firstAssistantText = gatewayResult.reply;
-      nextProfile = gatewayResult.profile;
+      nextProfile = gatewayResult.profile ?? profile;
+      nextAccount = gatewayResult.account;
     } else {
       firstAssistantText = await _apiClient.createChatCompletion(
         settings: settings,
@@ -130,6 +188,7 @@ class ChatService {
       return AssistantReplyResult(
         message: ChatMessage.assistant(firstAssistantText),
         profile: nextProfile,
+        account: nextAccount,
         contextMessages: contextMessages,
       );
     }
@@ -140,6 +199,7 @@ class ChatService {
       return AssistantReplyResult(
         message: ChatMessage.assistant(firstAssistantText),
         profile: nextProfile,
+        account: nextAccount,
         contextMessages: contextMessages,
       );
     }
@@ -159,12 +219,12 @@ class ChatService {
     if (settings.lanGatewayEnabled) {
       final gatewayResult = await _lanGatewayRequest(
         settings: settings,
-        profile: nextProfile,
         messages: retryMessages,
       );
       return AssistantReplyResult(
         message: ChatMessage.assistant(gatewayResult.reply),
-        profile: gatewayResult.profile,
+        profile: gatewayResult.profile ?? nextProfile,
+        account: gatewayResult.account ?? nextAccount,
         contextMessages: contextMessages,
       );
     }
@@ -176,20 +236,18 @@ class ChatService {
     return AssistantReplyResult(
       message: ChatMessage.assistant(secondAssistantText),
       profile: nextProfile,
+      account: nextAccount,
       contextMessages: contextMessages,
     );
   }
 
   Future<GatewayChatResult> _lanGatewayRequest({
     required ChatSettings settings,
-    required UserProfile profile,
     required List<ChatMessage> messages,
   }) async {
     try {
       return await _lanGatewayClient.requestChat(
         gatewayBaseUrl: settings.normalizedLanGatewayUrl,
-        profileId: profile.id,
-        profileName: profile.displayName,
         model: settings.model,
         temperature: settings.temperature,
         messages: messages,
@@ -390,8 +448,7 @@ class ChatService {
   static const String _webModeInstruction =
       'Режим веб-доступа включен по запросу пользователя (ссылка или явная команда посмотреть в интернете). '
       'У тебя есть доступ к интернет-данным через блок "Контекст из интернета". '
-      'Отвечай строго по этому блоку, не придумывай факты, не заявляй, что интернета нет, '
-      'и при наличии URL/TITLE/CONTENT используй их как единственный источник о ссылке или веб-запросе.';
+      'Отвечай строго по этому блоку, не придумывай факты и используй только факты из контекста.';
 
   static const String _webFallbackInstruction =
       'Предыдущий ответ был недостаточно уверенным. Сформируй новый финальный ответ только на основе веб-контекста. '
@@ -441,10 +498,12 @@ class AssistantReplyResult {
   const AssistantReplyResult({
     required this.message,
     required this.profile,
+    required this.account,
     required this.contextMessages,
   });
 
   final ChatMessage message;
   final UserProfile profile;
+  final AuthAccount? account;
   final List<ChatMessage> contextMessages;
 }

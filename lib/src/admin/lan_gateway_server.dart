@@ -1,26 +1,37 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+
+import 'package:crypto/crypto.dart';
 
 import '../data/remote/lm_studio_api_client.dart';
+import '../models/auth_account.dart';
 import '../models/chat_message.dart';
 import '../models/chat_settings.dart';
 import '../models/user_plan.dart';
 import '../models/user_profile.dart';
+import 'auth_store.dart';
 import 'profile_store.dart';
 
 class LanGatewayServer {
   LanGatewayServer({
     required ProfileStore profileStore,
+    required AuthStore authStore,
     LmStudioApiClient? lmStudioApiClient,
   }) : _profileStore = profileStore,
+       _authStore = authStore,
        _lmStudioApiClient = lmStudioApiClient ?? LmStudioApiClient();
 
   final ProfileStore _profileStore;
+  final AuthStore _authStore;
   final LmStudioApiClient _lmStudioApiClient;
   final StreamController<void> _updates = StreamController<void>.broadcast();
+  final Random _random = Random.secure();
 
   final Map<String, UserProfile> _profiles = <String, UserProfile>{};
+  final Map<String, AuthAccount> _accounts = <String, AuthAccount>{};
+  final Map<String, String> _ipBindings = <String, String>{};
   final List<_QueueJob> _queue = <_QueueJob>[];
 
   HttpServer? _server;
@@ -48,6 +59,16 @@ class LanGatewayServer {
     return list;
   }
 
+  List<AuthAccount> get accounts {
+    final list = _accounts.values.toList(growable: false);
+    list.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return list;
+  }
+
+  AuthAccount? accountByProfileId(String profileId) {
+    return _accounts[profileId];
+  }
+
   Future<void> start({
     String host = '0.0.0.0',
     int port = 8088,
@@ -65,10 +86,23 @@ class LanGatewayServer {
         ? ChatSettings.defaultModel
         : defaultModel.trim();
 
-    final loaded = await _profileStore.loadProfiles();
+    final loadedProfiles = await _profileStore.loadProfiles();
     _profiles
       ..clear()
-      ..addAll(loaded);
+      ..addAll(loadedProfiles);
+
+    final authSnapshot = await _authStore.loadSnapshot();
+    _accounts
+      ..clear()
+      ..addAll(authSnapshot.accounts);
+
+    _ipBindings
+      ..clear()
+      ..addEntries(
+        authSnapshot.ipBindings.entries.where(
+          (entry) => _accounts.containsKey(entry.value),
+        ),
+      );
 
     _server = await HttpServer.bind(_bindHost, _bindPort);
     unawaited(_listenLoop(_server!));
@@ -119,34 +153,6 @@ class LanGatewayServer {
     _emitUpdate();
   }
 
-  Future<UserProfile> syncProfile({
-    required String profileId,
-    required String profileName,
-  }) async {
-    final normalizedId = profileId.trim();
-    final normalizedName = profileName.trim();
-    if (normalizedId.isEmpty) {
-      throw const GatewayServerException('Пустой profileId.');
-    }
-    final now = DateTime.now();
-    final existing = _profiles[normalizedId];
-    final profile = existing == null
-        ? UserProfile.initial(
-            id: normalizedId,
-            name: normalizedName.isEmpty ? 'User' : normalizedName,
-          )
-        : existing.copyWith(
-            displayName: normalizedName.isEmpty
-                ? existing.displayName
-                : normalizedName,
-            updatedAt: now,
-          );
-    _profiles[normalizedId] = profile;
-    await _persistProfiles();
-    _emitUpdate();
-    return profile;
-  }
-
   Future<void> _listenLoop(HttpServer server) async {
     await for (final request in server) {
       unawaited(_handleRequest(request));
@@ -171,6 +177,8 @@ class LanGatewayServer {
           'port': bindPort,
           'lmStudioBaseUrl': _lmStudioBaseUrl,
           'defaultModel': _defaultModel,
+          'accountCount': _accounts.length,
+          'boundIpCount': _ipBindings.length,
         });
         return;
       }
@@ -185,24 +193,49 @@ class LanGatewayServer {
         return;
       }
 
-      if (method == 'POST' &&
+      if (method == 'GET' &&
           segments.length == 2 &&
           segments[0] == 'api' &&
-          segments[1] == 'sync-profile') {
-        final body = await _readJsonBody(request);
-        final profileId = (body['profileId'] as String? ?? '').trim();
-        final profileName = (body['profileName'] as String? ?? '').trim();
-        if (profileId.isEmpty) {
-          await _writeError(request.response, 'profileId обязателен.', 400);
-          return;
-        }
-        final profile = await syncProfile(
-          profileId: profileId,
-          profileName: profileName,
-        );
+          segments[1] == 'accounts') {
         await _writeJson(request.response, <String, dynamic>{
-          'profile': profile.toJson(),
+          'accounts': accounts.map((item) => item.toPublicJson()).toList(),
         });
+        return;
+      }
+
+      if (method == 'GET' &&
+          segments.length == 3 &&
+          segments[0] == 'api' &&
+          segments[1] == 'auth' &&
+          segments[2] == 'session') {
+        await _handleAuthSession(request);
+        return;
+      }
+
+      if (method == 'POST' &&
+          segments.length == 3 &&
+          segments[0] == 'api' &&
+          segments[1] == 'auth' &&
+          segments[2] == 'register') {
+        await _handleAuthRegister(request);
+        return;
+      }
+
+      if (method == 'POST' &&
+          segments.length == 3 &&
+          segments[0] == 'api' &&
+          segments[1] == 'auth' &&
+          segments[2] == 'login') {
+        await _handleAuthLogin(request);
+        return;
+      }
+
+      if (method == 'POST' &&
+          segments.length == 3 &&
+          segments[0] == 'api' &&
+          segments[1] == 'auth' &&
+          segments[2] == 'logout') {
+        await _handleAuthLogout(request);
         return;
       }
 
@@ -257,24 +290,140 @@ class LanGatewayServer {
     }
   }
 
-  Future<void> _handleChat(HttpRequest request) async {
+  Future<void> _handleAuthSession(HttpRequest request) async {
+    final ip = _requestIp(request);
+    final account = _currentAccountForIp(ip);
+    if (account == null) {
+      await _writeJson(request.response, <String, dynamic>{
+        'authenticated': false,
+      });
+      return;
+    }
+    final profile = await _ensureProfileForAccount(account, persist: true);
+    await _writeJson(request.response, <String, dynamic>{
+      'authenticated': true,
+      'account': account.toPublicJson(),
+      'profile': profile.toJson(),
+    });
+  }
+
+  Future<void> _handleAuthRegister(HttpRequest request) async {
     final body = await _readJsonBody(request);
-    final profileId = (body['profileId'] as String? ?? '').trim();
-    final profileName = (body['profileName'] as String? ?? '').trim();
-    if (profileId.isEmpty) {
-      await _writeError(request.response, 'profileId обязателен.', 400);
+    final login = (body['login'] as String? ?? '').trim();
+    final password = (body['password'] as String? ?? '').trim();
+    final email = (body['email'] as String? ?? '').trim();
+    final name = (body['name'] as String? ?? '').trim();
+
+    _validateRegistration(
+      login: login,
+      password: password,
+      email: email,
+      name: name,
+    );
+
+    final loginLower = login.toLowerCase();
+    final emailLower = email.toLowerCase();
+    for (final existing in _accounts.values) {
+      if (existing.login.toLowerCase() == loginLower) {
+        throw const GatewayServerException('Логин уже занят.');
+      }
+      if (existing.email.toLowerCase() == emailLower) {
+        throw const GatewayServerException('Email уже зарегистрирован.');
+      }
+    }
+
+    final accountId = _generateAccountId();
+    final salt = _generateSalt();
+    final passwordHash = _hashPassword(password, salt);
+    final now = DateTime.now();
+    final account = AuthAccount(
+      id: accountId,
+      login: login,
+      email: email,
+      displayName: name,
+      passwordHash: passwordHash,
+      passwordSalt: salt,
+      createdAt: now,
+      updatedAt: now,
+    );
+
+    _accounts[account.id] = account;
+    final profile = await _ensureProfileForAccount(account, persist: true);
+
+    final ip = _requestIp(request);
+    _ipBindings[ip] = account.id;
+    await _persistAuth();
+    _emitUpdate();
+
+    await _writeJson(request.response, <String, dynamic>{
+      'authenticated': true,
+      'account': account.toPublicJson(),
+      'profile': profile.toJson(),
+    });
+  }
+
+  Future<void> _handleAuthLogin(HttpRequest request) async {
+    final body = await _readJsonBody(request);
+    final login = (body['login'] as String? ?? '').trim();
+    final password = (body['password'] as String? ?? '').trim();
+    if (login.isEmpty || password.isEmpty) {
+      throw const GatewayServerException('Введите логин и пароль.');
+    }
+
+    AuthAccount? account;
+    final loginLower = login.toLowerCase();
+    for (final item in _accounts.values) {
+      if (item.login.toLowerCase() == loginLower ||
+          item.email.toLowerCase() == loginLower) {
+        account = item;
+        break;
+      }
+    }
+    if (account == null) {
+      throw const GatewayServerException('Пользователь не найден.');
+    }
+
+    final expectedHash = _hashPassword(password, account.passwordSalt);
+    if (expectedHash != account.passwordHash) {
+      throw const GatewayServerException('Неверный пароль.');
+    }
+
+    final ip = _requestIp(request);
+    _ipBindings[ip] = account.id;
+    await _persistAuth();
+
+    final profile = await _ensureProfileForAccount(account, persist: true);
+    _emitUpdate();
+    await _writeJson(request.response, <String, dynamic>{
+      'authenticated': true,
+      'account': account.toPublicJson(),
+      'profile': profile.toJson(),
+    });
+  }
+
+  Future<void> _handleAuthLogout(HttpRequest request) async {
+    final ip = _requestIp(request);
+    _ipBindings.remove(ip);
+    await _persistAuth();
+    _emitUpdate();
+    await _writeJson(request.response, <String, dynamic>{'ok': true});
+  }
+
+  Future<void> _handleChat(HttpRequest request) async {
+    final ip = _requestIp(request);
+    final account = _currentAccountForIp(ip);
+    if (account == null) {
+      await _writeError(request.response, 'Нужно войти в аккаунт.', 401);
       return;
     }
 
-    var profile = await syncProfile(
-      profileId: profileId,
-      profileName: profileName,
-    );
+    var profile = await _ensureProfileForAccount(account, persist: true);
     if (profile.isBanned) {
       await _writeError(request.response, 'Профиль заблокирован.', 403);
       return;
     }
 
+    final body = await _readJsonBody(request);
     final messages = _parseMessages(body['messages']);
     if (messages.isEmpty) {
       await _writeError(
@@ -308,11 +457,42 @@ class LanGatewayServer {
     unawaited(_processQueue());
 
     final reply = await completer.future;
-    profile = _profiles[profileId] ?? profile;
+    profile = _profiles[account.id] ?? profile;
     await _writeJson(request.response, <String, dynamic>{
       'reply': reply,
       'profile': profile.toJson(),
+      'account': account.toPublicJson(),
     });
+  }
+
+  Future<UserProfile> _ensureProfileForAccount(
+    AuthAccount account, {
+    required bool persist,
+  }) async {
+    final existing = _profiles[account.id];
+    final now = DateTime.now();
+    final profile = existing == null
+        ? UserProfile.initial(id: account.id, name: account.displayName)
+        : existing.copyWith(displayName: account.displayName, updatedAt: now);
+    _profiles[account.id] = profile;
+    if (persist) {
+      await _persistProfiles();
+    }
+    return profile;
+  }
+
+  AuthAccount? _currentAccountForIp(String ip) {
+    final accountId = _ipBindings[ip];
+    if (accountId == null) {
+      return null;
+    }
+    final account = _accounts[accountId];
+    if (account == null) {
+      _ipBindings.remove(ip);
+      unawaited(_persistAuth());
+      return null;
+    }
+    return account;
   }
 
   Future<void> _processQueue() async {
@@ -473,6 +653,69 @@ class LanGatewayServer {
 
   Future<void> _persistProfiles() {
     return _profileStore.saveProfiles(_profiles.values);
+  }
+
+  Future<void> _persistAuth() {
+    return _authStore.saveSnapshot(
+      AuthSnapshot(accounts: _accounts, ipBindings: _ipBindings),
+    );
+  }
+
+  void _validateRegistration({
+    required String login,
+    required String password,
+    required String email,
+    required String name,
+  }) {
+    if (login.length < 3 || login.length > 32) {
+      throw const GatewayServerException(
+        'Логин должен содержать от 3 до 32 символов.',
+      );
+    }
+    if (!RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(login)) {
+      throw const GatewayServerException(
+        'Логин может содержать только латиницу, цифры и ._-',
+      );
+    }
+    if (password.length < 6) {
+      throw const GatewayServerException(
+        'Пароль должен быть не короче 6 символов.',
+      );
+    }
+    if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email)) {
+      throw const GatewayServerException('Введите корректный email.');
+    }
+    if (name.length < 2 || name.length > 64) {
+      throw const GatewayServerException(
+        'Имя должно содержать от 2 до 64 символов.',
+      );
+    }
+  }
+
+  String _requestIp(HttpRequest request) {
+    final forwarded = request.headers.value('x-forwarded-for');
+    if (forwarded != null && forwarded.trim().isNotEmpty) {
+      final first = forwarded.split(',').first.trim();
+      if (first.isNotEmpty) {
+        return first;
+      }
+    }
+    return request.connectionInfo?.remoteAddress.address ?? 'unknown';
+  }
+
+  String _generateAccountId() {
+    final ts = DateTime.now().microsecondsSinceEpoch;
+    final suffix = _random.nextInt(9000) + 1000;
+    return 'acc_$ts$suffix';
+  }
+
+  String _generateSalt() {
+    final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
+    return base64UrlEncode(bytes);
+  }
+
+  String _hashPassword(String password, String salt) {
+    return sha256.convert(utf8.encode('$salt::$password')).toString();
   }
 
   String _normalizeUrl(String url) {

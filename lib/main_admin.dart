@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'src/admin/admin_app.dart';
+import 'src/admin/auth_store.dart';
 import 'src/admin/lan_gateway_server.dart';
 import 'src/admin/profile_store.dart';
 
@@ -31,8 +32,15 @@ Future<void> main() async {
   final profilesFile = File(
     '${supportDir.path}${Platform.pathSeparator}goodogs_profiles.json',
   );
+  final authFile = File(
+    '${supportDir.path}${Platform.pathSeparator}goodogs_auth.json',
+  );
   final profileStore = ProfileStore(file: profilesFile);
-  final server = LanGatewayServer(profileStore: profileStore);
+  final authStore = AuthStore(file: authFile);
+  final server = LanGatewayServer(
+    profileStore: profileStore,
+    authStore: authStore,
+  );
 
   runApp(GoodogsAdminApp(server: server));
 }

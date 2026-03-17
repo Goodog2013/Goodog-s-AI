@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../../application/chat_service.dart';
 import '../../application/settings_service.dart';
 import '../../data/remote/lm_studio_api_client.dart';
+import '../../models/auth_account.dart';
 import '../../models/chat_folder.dart';
 import '../../models/chat_message.dart';
 import '../../models/chat_settings.dart';
@@ -27,20 +28,28 @@ class ChatController extends ChangeNotifier {
     id: 'local_user',
     name: ChatSettings.defaultProfileName,
   );
+  AuthAccount? _account;
 
   final Map<String, List<ChatMessage>> _frozenContextByThread = {};
 
   bool _isInitialized = false;
   bool _isLoading = false;
+  bool _isAuthenticated = false;
   String? _lastError;
+  String? _authError;
   String _searchQuery = '';
 
   ChatSettings get settings => _settings;
   UserProfile get profile => _profile;
+  AuthAccount? get account => _account;
   PlanLimits get limits => _profile.limits;
   bool get isInitialized => _isInitialized;
   bool get isLoading => _isLoading;
+  bool get isAuthenticated => _isAuthenticated;
+  bool get requiresAuthentication =>
+      _settings.lanGatewayEnabled && !_isAuthenticated;
   String? get lastError => _lastError;
+  String? get authError => _authError;
   String get searchQuery => _searchQuery;
   bool get hasSearchQuery => _searchQuery.trim().isNotEmpty;
 
@@ -156,12 +165,15 @@ class ChatController extends ChangeNotifier {
       final loadedWorkspace = await _chatService.loadWorkspace();
       _settings = normalizedSettings;
       _workspace = loadedWorkspace;
-      _profile = UserProfile.initial(
-        id: _settings.profileId,
-        name: _settings.profileName,
-      );
+      _authError = null;
       _lastError = null;
-      await syncProfile(notify: false);
+
+      if (_settings.lanGatewayEnabled) {
+        await _restoreAuthSessionInternal();
+      } else {
+        _setLocalProfile();
+        _isAuthenticated = true;
+      }
     } catch (_) {
       _lastError = 'Не удалось загрузить локальные данные приложения.';
     } finally {
@@ -174,28 +186,158 @@ class ChatController extends ChangeNotifier {
     final normalized = await _settingsService.ensureProfileIdentity(settings);
     _settings = normalized;
     await _settingsService.saveSettings(normalized);
-    await syncProfile(notify: false);
+
+    if (_settings.lanGatewayEnabled) {
+      await _restoreAuthSessionInternal();
+    } else {
+      _account = null;
+      _authError = null;
+      _setLocalProfile();
+      _isAuthenticated = true;
+    }
     notifyListeners();
   }
 
   Future<void> syncProfile({bool notify = true}) async {
-    try {
-      final synced = await _chatService.syncProfile(settings: _settings);
-      _profile = synced;
-      if (_profile.isBanned) {
-        _lastError = 'Ваш профиль заблокирован администратором.';
-      } else {
-        _lastError = null;
-      }
-    } on ChatApiException catch (error) {
-      _lastError = error.message;
-    } catch (_) {
-      _lastError = 'Не удалось синхронизировать профиль.';
-    } finally {
-      if (notify) {
-        notifyListeners();
-      }
+    if (_settings.lanGatewayEnabled) {
+      await _restoreAuthSessionInternal();
+    } else {
+      _setLocalProfile();
+      _isAuthenticated = true;
+      _lastError = null;
     }
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _restoreAuthSessionInternal() async {
+    try {
+      final session = await _chatService.restoreAuthSession(
+        settings: _settings,
+      );
+      if (session == null) {
+        _isAuthenticated = false;
+        _account = null;
+        _setLocalProfile();
+        _authError = null;
+        return;
+      }
+      _isAuthenticated = true;
+      _account = session.account;
+      _profile = session.profile;
+      _authError = null;
+      _lastError = _profile.isBanned
+          ? 'Ваш профиль заблокирован администратором.'
+          : null;
+      await _persistIdentityFromAccount(session.account);
+    } on ChatApiException catch (error) {
+      _isAuthenticated = false;
+      _account = null;
+      _setLocalProfile();
+      _authError = error.message;
+    } catch (_) {
+      _isAuthenticated = false;
+      _account = null;
+      _setLocalProfile();
+      _authError = 'Не удалось восстановить сессию.';
+    }
+  }
+
+  Future<void> _persistIdentityFromAccount(AuthAccount account) async {
+    _settings = _settings.copyWith(
+      profileId: account.id,
+      profileName: account.displayName,
+    );
+    await _settingsService.saveSettings(_settings);
+  }
+
+  void _setLocalProfile() {
+    _profile = _chatService.localProfileFromSettings(_settings);
+  }
+
+  Future<String?> register({
+    required String login,
+    required String password,
+    required String email,
+    required String name,
+  }) async {
+    try {
+      final session = await _chatService.register(
+        settings: _settings,
+        login: login,
+        password: password,
+        email: email,
+        name: name,
+      );
+      _account = session.account;
+      _profile = session.profile;
+      _isAuthenticated = true;
+      _authError = null;
+      _lastError = null;
+      await _persistIdentityFromAccount(session.account);
+      notifyListeners();
+      return null;
+    } on ChatApiException catch (error) {
+      _authError = error.message;
+      notifyListeners();
+      return error.message;
+    } catch (_) {
+      _authError = 'Ошибка регистрации.';
+      notifyListeners();
+      return _authError;
+    }
+  }
+
+  Future<String?> login({
+    required String login,
+    required String password,
+  }) async {
+    try {
+      final session = await _chatService.login(
+        settings: _settings,
+        login: login,
+        password: password,
+      );
+      _account = session.account;
+      _profile = session.profile;
+      _isAuthenticated = true;
+      _authError = null;
+      _lastError = null;
+      await _persistIdentityFromAccount(session.account);
+      notifyListeners();
+      return null;
+    } on ChatApiException catch (error) {
+      _authError = error.message;
+      notifyListeners();
+      return error.message;
+    } catch (_) {
+      _authError = 'Ошибка входа.';
+      notifyListeners();
+      return _authError;
+    }
+  }
+
+  Future<void> logout() async {
+    if (_settings.lanGatewayEnabled) {
+      try {
+        await _chatService.logout(settings: _settings);
+      } catch (_) {
+        // Ignore logout network errors for UX.
+      }
+      _isAuthenticated = false;
+      _account = null;
+      _authError = null;
+      _lastError = null;
+      notifyListeners();
+      return;
+    }
+
+    _isAuthenticated = true;
+    _account = null;
+    _authError = null;
+    _lastError = null;
+    notifyListeners();
   }
 
   void updateSearchQuery(String query) {
@@ -212,6 +354,11 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> createThread({String? title, String? folderId}) async {
+    if (requiresAuthentication) {
+      _lastError = 'Сначала войдите в аккаунт.';
+      notifyListeners();
+      return;
+    }
     if (!canCreateThread) {
       _lastError = 'Лимит тарифа: максимум ${limits.maxChats} чатов.';
       notifyListeners();
@@ -450,6 +597,11 @@ class ChatController extends ChangeNotifier {
     if (_isLoading) {
       return 'Дождитесь завершения текущего ответа.';
     }
+    if (requiresAuthentication) {
+      _lastError = 'Сначала войдите в аккаунт.';
+      notifyListeners();
+      return _lastError;
+    }
     if (_profile.isBanned) {
       _lastError = 'Ваш профиль заблокирован администратором.';
       notifyListeners();
@@ -491,6 +643,10 @@ class ChatController extends ChangeNotifier {
         fixedContext: fixedContext,
       );
       _profile = assistantResult.profile;
+      if (assistantResult.account != null) {
+        _account = assistantResult.account;
+        await _persistIdentityFromAccount(assistantResult.account!);
+      }
       if (_profile.isBanned) {
         throw const ChatApiException(
           'Ваш профиль заблокирован администратором.',
