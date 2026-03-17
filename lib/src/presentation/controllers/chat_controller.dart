@@ -56,13 +56,41 @@ class ChatController extends ChangeNotifier {
   bool get isCurrentUserBanned => _profile.isBanned;
   bool get autoContextRefreshEnabled => limits.autoContextRefresh;
   int get activeContextMessagesCount {
+    final maxContextMessages = limits.maxContextMessages;
+    final conversationNonSystem = activeThread.messages
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: false);
+
     if (limits.autoContextRefresh) {
-      final nonSystemCount = activeThread.messages
-          .where((m) => m.role != ChatRole.system)
-          .length;
-      return nonSystemCount.clamp(0, limits.maxContextMessages);
+      return conversationNonSystem.length.clamp(0, maxContextMessages);
     }
-    return _frozenContextByThread[activeThread.id]?.length ?? 0;
+
+    final frozen = _frozenContextByThread[activeThread.id];
+    if (frozen == null || frozen.isEmpty) {
+      return conversationNonSystem.length.clamp(0, maxContextMessages);
+    }
+
+    final merged = frozen
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: true);
+    final mergedIds = merged.map((m) => m.id).toSet();
+
+    final tailCount = conversationNonSystem.length >= 2
+        ? 2
+        : conversationNonSystem.length;
+    final start = conversationNonSystem.length - tailCount;
+    for (var i = start; i < conversationNonSystem.length; i++) {
+      final item = conversationNonSystem[i];
+      if (!mergedIds.contains(item.id)) {
+        merged.add(item);
+        mergedIds.add(item.id);
+      }
+    }
+
+    if (merged.length > maxContextMessages) {
+      return maxContextMessages;
+    }
+    return merged.length;
   }
 
   bool get canCreateFolder => _workspace.folders.length < limits.maxFolders;
