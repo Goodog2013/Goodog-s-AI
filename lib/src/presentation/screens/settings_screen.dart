@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/app_language.dart';
@@ -40,6 +44,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _isSaving = false;
   bool _isClearing = false;
+  bool _isCheckingLmStudio = false;
+  bool _isCheckingLanGateway = false;
 
   @override
   void initState() {
@@ -207,13 +213,202 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     final text = value?.trim() ?? '';
     if (text.isEmpty) {
-      return 'Укажите URL LAN-шлюза.';
+      return _i18n.t('lanGatewayRequired');
     }
     final uri = Uri.tryParse(text);
     if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
-      return 'Некорректный URL LAN-шлюза.';
+      return _i18n.t('lanGatewayInvalid');
     }
     return null;
+  }
+
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  String _normalizeBaseUrl(String rawUrl) {
+    final text = rawUrl.trim();
+    if (text.endsWith('/')) {
+      return text.substring(0, text.length - 1);
+    }
+    return text;
+  }
+
+  void _applyBaseUrlPreset(String value) {
+    _baseUrlController.text = value;
+  }
+
+  void _applyGatewayUrlPreset(String value) {
+    _lanGatewayUrlController.text = value;
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _checkLmStudioConnection() async {
+    if (_isCheckingLmStudio) {
+      return;
+    }
+    setState(() {
+      _isCheckingLmStudio = true;
+    });
+    try {
+      final baseUrl = _normalizeBaseUrl(_baseUrlController.text);
+      final uri = Uri.tryParse('$baseUrl/v1/models');
+      if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+        _showSnack(_i18n.t('baseUrlInvalid'));
+        return;
+      }
+
+      final statusCode = await _probeStatusCode(uri);
+      if (statusCode >= 200 && statusCode < 400) {
+        _showSnack(_i18n.t('connectionOk', {'target': 'LM Studio'}));
+      } else {
+        _showSnack(
+          _i18n.t('connectionFailedStatus', {
+            'target': 'LM Studio',
+            'status': statusCode.toString(),
+          }),
+        );
+      }
+    } on TimeoutException {
+      _showSnack(_i18n.t('connectionTimeout', {'target': 'LM Studio'}));
+    } on SocketException {
+      _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LM Studio'}));
+    } catch (_) {
+      _showSnack(_i18n.t('connectionFailed', {'target': 'LM Studio'}));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCheckingLmStudio = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _checkLanGatewayConnection() async {
+    if (_isCheckingLanGateway) {
+      return;
+    }
+    setState(() {
+      _isCheckingLanGateway = true;
+    });
+    try {
+      final baseUrl = _normalizeBaseUrl(_lanGatewayUrlController.text);
+      final uri = Uri.tryParse('$baseUrl/api/health');
+      if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+        _showSnack(_i18n.t('lanGatewayInvalid'));
+        return;
+      }
+
+      final statusCode = await _probeStatusCode(uri);
+      if (statusCode >= 200 && statusCode < 400) {
+        _showSnack(_i18n.t('connectionOk', {'target': 'LAN gateway'}));
+      } else {
+        _showSnack(
+          _i18n.t('connectionFailedStatus', {
+            'target': 'LAN gateway',
+            'status': statusCode.toString(),
+          }),
+        );
+      }
+    } on TimeoutException {
+      _showSnack(_i18n.t('connectionTimeout', {'target': 'LAN gateway'}));
+    } on SocketException {
+      _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LAN gateway'}));
+    } catch (_) {
+      _showSnack(_i18n.t('connectionFailed', {'target': 'LAN gateway'}));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCheckingLanGateway = false;
+        });
+      }
+    }
+  }
+
+  Future<int> _probeStatusCode(Uri uri) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final request = await client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 6));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final response = await request.close().timeout(
+        const Duration(seconds: 6),
+      );
+      await response.drain();
+      return response.statusCode;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Widget _buildAndroidNetworkHints(AppI18n i18n) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.secondaryContainer.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colors.secondary.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.wifi_find_rounded, color: colors.onSecondaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  i18n.t('androidNetworkTitle'),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    color: colors.onSecondaryContainer,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            i18n.t('androidNetworkSubtitle'),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: colors.onSecondaryContainer),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ActionChip(
+                label: Text(i18n.t('presetEmulator')),
+                onPressed: () => _applyBaseUrlPreset('http://10.0.2.2:1234'),
+              ),
+              ActionChip(
+                label: Text(i18n.t('presetLanExample')),
+                onPressed: () =>
+                    _applyBaseUrlPreset('http://192.168.1.10:1234'),
+              ),
+              ActionChip(
+                label: Text(i18n.t('presetGatewayLan')),
+                onPressed: () =>
+                    _applyGatewayUrlPreset('http://192.168.1.10:8088'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   AppI18n get _i18n => AppI18n(_languageCode);
@@ -425,6 +620,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     title: i18n.t('connection'),
                     subtitle: i18n.t('connectionSubtitle'),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         TextFormField(
                           controller: _baseUrlController,
@@ -442,6 +638,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           validator: _validateModel,
                         ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _isCheckingLmStudio
+                                ? null
+                                : _checkLmStudioConnection,
+                            icon: _isCheckingLmStudio
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.wifi_tethering_rounded),
+                            label: Text(
+                              _isCheckingLmStudio
+                                  ? i18n.t('checking')
+                                  : i18n.t('checkLmStudio'),
+                            ),
+                          ),
+                        ),
+                        if (_isAndroid) _buildAndroidNetworkHints(i18n),
                       ],
                     ),
                   ),
@@ -492,6 +712,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               hintText: 'http://192.168.1.10:8088',
                             ),
                             validator: _validateLanGatewayUrl,
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: _isCheckingLanGateway
+                                  ? null
+                                  : _checkLanGatewayConnection,
+                              icon: _isCheckingLanGateway
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.route_rounded),
+                              label: Text(
+                                _isCheckingLanGateway
+                                    ? i18n.t('checking')
+                                    : i18n.t('checkLanGateway'),
+                              ),
+                            ),
                           ),
                         ],
                       ],
