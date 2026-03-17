@@ -1,4 +1,6 @@
 param(
+  [ValidateSet("user", "admin")]
+  [string]$InstallerType = "user",
   [string]$SourceDir = "",
   [string]$OutputDir = "",
   [string]$InnoCompiler = "",
@@ -74,11 +76,36 @@ function Resolve-AppVersion {
   return "1.0.0"
 }
 
+function Resolve-InstallerConfig {
+  param(
+    [string]$ProjectDir,
+    [string]$Type
+  )
+
+  if ($Type -eq "admin") {
+    return @{
+      SourceDir = Join-Path $ProjectDir "artifacts\windows_admin_release"
+      IssPath = Join-Path $ProjectDir "installer\goodogs_ai_admin_installer.iss"
+      ExpectedExeName = "Goodog's AI Admin.exe"
+      DefaultOutputBaseFilenamePrefix = "Goodog's AI Admin Setup v"
+    }
+  }
+
+  return @{
+    SourceDir = Join-Path $ProjectDir "artifacts\windows_release"
+    IssPath = Join-Path $ProjectDir "installer\goodogs_ai_installer.iss"
+    ExpectedExeName = "Goodog's AI.exe"
+    DefaultOutputBaseFilenamePrefix = "Goodog's AI Setup v"
+  }
+}
+
 $projectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$installerConfig = Resolve-InstallerConfig -ProjectDir $projectDir -Type $InstallerType
+
 $sourceDirPath = if ($SourceDir) {
   (Resolve-Path $SourceDir).Path
 } else {
-  (Resolve-Path (Join-Path $projectDir "artifacts\windows_release")).Path
+  (Resolve-Path $installerConfig.SourceDir).Path
 }
 if (-not (Test-Path $sourceDirPath)) {
   throw "Release directory was not found: $sourceDirPath"
@@ -93,9 +120,9 @@ New-Item -ItemType Directory -Force -Path $outputDirPath | Out-Null
 $outputDirPath = (Resolve-Path $outputDirPath).Path
 
 $appVersionValue = if ($AppVersion) { $AppVersion } else { Resolve-AppVersion -ProjectDir $projectDir }
-$baseFilename = if ($OutputBaseFilename) { $OutputBaseFilename } else { "Goodog's AI Setup v$appVersionValue" }
+$baseFilename = if ($OutputBaseFilename) { $OutputBaseFilename } else { "$($installerConfig.DefaultOutputBaseFilenamePrefix)$appVersionValue" }
 
-$exeName = "Goodog's AI.exe"
+$exeName = $installerConfig.ExpectedExeName
 if (-not (Test-Path (Join-Path $sourceDirPath $exeName))) {
   $fallbackExe = Get-ChildItem -Path $sourceDirPath -Filter "*.exe" |
     Sort-Object LastWriteTime -Descending |
@@ -106,7 +133,7 @@ if (-not (Test-Path (Join-Path $sourceDirPath $exeName))) {
   $exeName = $fallbackExe.Name
 }
 
-$issPath = Join-Path $projectDir "installer\goodogs_ai_installer.iss"
+$issPath = $installerConfig.IssPath
 $wizardImage = Join-Path $projectDir "installer\assets\wizard.bmp"
 $wizardSmallImage = Join-Path $projectDir "installer\assets\wizard_small.bmp"
 $setupIcon = Join-Path $projectDir "Goodog's AI.ico"
@@ -137,10 +164,11 @@ $args = @(
   $issPath
 )
 
-Write-Host "Inno Setup: $iscc"
-Write-Host "Source:     $sourceDirPath"
-Write-Host "Output:     $outputDirPath"
-Write-Host "Version:    $appVersionValue"
+Write-Host "Installer type: $InstallerType"
+Write-Host "Inno Setup:     $iscc"
+Write-Host "Source:         $sourceDirPath"
+Write-Host "Output:         $outputDirPath"
+Write-Host "Version:        $appVersionValue"
 
 & $iscc @args
 if ($LASTEXITCODE -ne 0) {
@@ -154,5 +182,5 @@ if (-not $installer) {
   throw "Installer was not produced in: $outputDirPath"
 }
 
-Write-Host "Installer:  $($installer.FullName)"
+Write-Host "Installer:      $($installer.FullName)"
 $installer.FullName

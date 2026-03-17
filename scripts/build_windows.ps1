@@ -192,30 +192,6 @@ if (-not (Test-Path $releaseDir)) {
 $chatArtifactDir = Copy-ReleaseArtifacts -ReleaseDir $releaseDir -PreferredArtifactDir $chatArtifactBaseDir -FallbackNamePrefix "windows_release"
 $chatExePath = Resolve-PrimaryExe -ArtifactDir $chatArtifactDir -ExpectedName "Goodog's AI.exe" -FallbackName "goodogs_chat.exe"
 
-$installerPath = ""
-if (-not $SkipInstaller) {
-  $installerScript = Join-Path $projectDir "scripts\\build_installer.ps1"
-  if (-not (Test-Path $installerScript)) {
-    throw "Installer script was not found: $installerScript"
-  }
-
-  $installerArgs = @{
-    SourceDir = $chatArtifactDir
-    OutputDir = $installerDir
-  }
-  if ($InnoCompiler) {
-    $installerArgs["InnoCompiler"] = $InnoCompiler
-  }
-
-  $installerOutput = & $installerScript @installerArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "Installer creation failed."
-  }
-  if ($installerOutput) {
-    $installerPath = $installerOutput[-1]
-  }
-}
-
 Write-Host ""
 Write-Host "Building admin app..."
 Invoke-Checked -Executable $flutter -Arguments @("build", "windows", "--release", "-t", "lib/main_admin.dart") -WorkingDirectory $workspaceDir
@@ -234,15 +210,59 @@ if ($adminExePath -ne $renamedAdminExe) {
   $adminExePath = $renamedAdminExe
 }
 
+$userInstallerPath = ""
+$adminInstallerPath = ""
+if (-not $SkipInstaller) {
+  $installerScript = Join-Path $projectDir "scripts\\build_installer.ps1"
+  if (-not (Test-Path $installerScript)) {
+    throw "Installer script was not found: $installerScript"
+  }
+
+  $userInstallerArgs = @{
+    InstallerType = "user"
+    SourceDir = $chatArtifactDir
+    OutputDir = $installerDir
+  }
+  if ($InnoCompiler) {
+    $userInstallerArgs["InnoCompiler"] = $InnoCompiler
+  }
+  $userInstallerOutput = & $installerScript @userInstallerArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "User installer creation failed."
+  }
+  if ($userInstallerOutput) {
+    $userInstallerPath = $userInstallerOutput[-1]
+  }
+
+  $adminInstallerArgs = @{
+    InstallerType = "admin"
+    SourceDir = $adminArtifactDir
+    OutputDir = $installerDir
+  }
+  if ($InnoCompiler) {
+    $adminInstallerArgs["InnoCompiler"] = $InnoCompiler
+  }
+  $adminInstallerOutput = & $installerScript @adminInstallerArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Admin installer creation failed."
+  }
+  if ($adminInstallerOutput) {
+    $adminInstallerPath = $adminInstallerOutput[-1]
+  }
+}
+
 Write-Host ""
 Write-Host "Build completed successfully."
 Write-Host "User artifacts:  $chatArtifactDir"
 Write-Host "User exe:        $chatExePath"
-if ($installerPath) {
-  Write-Host "Installer:       $installerPath"
+if ($userInstallerPath) {
+  Write-Host "User installer:  $userInstallerPath"
 }
 Write-Host "Admin artifacts: $adminArtifactDir"
 Write-Host "Admin exe:       $adminExePath"
+if ($adminInstallerPath) {
+  Write-Host "Admin installer: $adminInstallerPath"
+}
 
 if ($OpenOutput) {
   Start-Process explorer.exe $chatArtifactDir
