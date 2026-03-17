@@ -136,8 +136,11 @@ class ChatService {
         settings.webSearchEnabled &&
         latestUserInput != null &&
         WebIntentParser.requestsWeb(latestUserInput);
-    final webContext = shouldUseWebByIntent
-        ? await _buildWebContext(settings: settings, userQuery: latestUserInput)
+    final webPayload = shouldUseWebByIntent
+        ? await _buildWebContextPayload(
+            settings: settings,
+            userQuery: latestUserInput,
+          )
         : null;
 
     final contextMessages = _buildContextMessages(
@@ -159,10 +162,35 @@ class ChatService {
         ChatMessage.system(_noHallucinationInstruction),
     ];
 
+    if (shouldUseWebByIntent) {
+      if (webPayload == null || !webPayload.hasReliableData) {
+        return AssistantReplyResult(
+          message: ChatMessage.assistant(
+            _buildWebUnavailableReply(
+              payload: webPayload,
+              userQuery: latestUserInput,
+            ),
+          ),
+          profile: profile,
+          account: null,
+          contextMessages: contextMessages,
+        );
+      }
+
+      if (webPayload.containsUrl) {
+        return AssistantReplyResult(
+          message: ChatMessage.assistant(_buildDirectUrlReply(webPayload)),
+          profile: profile,
+          account: null,
+          contextMessages: contextMessages,
+        );
+      }
+    }
+
     final requestMessages = <ChatMessage>[
       ...baseSystemMessages,
       if (shouldUseWebByIntent) ChatMessage.system(_webModeInstruction),
-      if (webContext != null) ChatMessage.system(webContext),
+      if (webPayload != null) ChatMessage.system(webPayload.context),
       ...contextMessages,
     ];
 
@@ -193,6 +221,42 @@ class ChatService {
       );
     }
 
+    if (shouldUseWebByIntent) {
+      final intentPayload = webPayload;
+      if (intentPayload == null) {
+        return AssistantReplyResult(
+          message: ChatMessage.assistant(
+            _buildWebUnavailableReply(
+              payload: null,
+              userQuery: latestUserInput,
+            ),
+          ),
+          profile: nextProfile,
+          account: nextAccount,
+          contextMessages: contextMessages,
+        );
+      }
+
+      final hasFallbackSignal = _needsWebFallback(firstAssistantText);
+      final hasSourceUrls = _containsAnySourceUrl(
+        firstAssistantText,
+        intentPayload.results,
+      );
+      if (hasFallbackSignal || !hasSourceUrls) {
+        return AssistantReplyResult(
+          message: ChatMessage.assistant(
+            _buildSearchResultsReply(
+              payload: intentPayload,
+              userQuery: latestUserInput,
+            ),
+          ),
+          profile: nextProfile,
+          account: nextAccount,
+          contextMessages: contextMessages,
+        );
+      }
+    }
+
     final shouldRetryWithWeb =
         !shouldUseWebByIntent && _needsWebFallback(firstAssistantText);
     if (!shouldRetryWithWeb) {
@@ -204,15 +268,29 @@ class ChatService {
       );
     }
 
-    final fallbackWebContext = await _buildWebContext(
+    final fallbackWebPayload = await _buildWebContextPayload(
       settings: settings,
       userQuery: latestUserInput,
     );
+    if (fallbackWebPayload == null || !fallbackWebPayload.hasReliableData) {
+      return AssistantReplyResult(
+        message: ChatMessage.assistant(
+          _buildWebUnavailableReply(
+            payload: fallbackWebPayload,
+            userQuery: latestUserInput,
+          ),
+        ),
+        profile: nextProfile,
+        account: nextAccount,
+        contextMessages: contextMessages,
+      );
+    }
+
     final retryMessages = <ChatMessage>[
       ...baseSystemMessages,
       ChatMessage.system(_webModeInstruction),
       ChatMessage.system(_webFallbackInstruction),
-      if (fallbackWebContext != null) ChatMessage.system(fallbackWebContext),
+      ChatMessage.system(fallbackWebPayload.context),
       ...contextMessages,
     ];
 
@@ -221,8 +299,27 @@ class ChatService {
         settings: settings,
         messages: retryMessages,
       );
+      final fallbackText = gatewayResult.reply;
+      final hasFallbackSignal = _needsWebFallback(fallbackText);
+      final hasSourceUrls = _containsAnySourceUrl(
+        fallbackText,
+        fallbackWebPayload.results,
+      );
+      if (hasFallbackSignal || !hasSourceUrls) {
+        return AssistantReplyResult(
+          message: ChatMessage.assistant(
+            _buildSearchResultsReply(
+              payload: fallbackWebPayload,
+              userQuery: latestUserInput,
+            ),
+          ),
+          profile: gatewayResult.profile ?? nextProfile,
+          account: gatewayResult.account ?? nextAccount,
+          contextMessages: contextMessages,
+        );
+      }
       return AssistantReplyResult(
-        message: ChatMessage.assistant(gatewayResult.reply),
+        message: ChatMessage.assistant(fallbackText),
         profile: gatewayResult.profile ?? nextProfile,
         account: gatewayResult.account ?? nextAccount,
         contextMessages: contextMessages,
@@ -233,6 +330,25 @@ class ChatService {
       settings: settings,
       messages: retryMessages,
     );
+    final hasFallbackSignal = _needsWebFallback(secondAssistantText);
+    final hasSourceUrls = _containsAnySourceUrl(
+      secondAssistantText,
+      fallbackWebPayload.results,
+    );
+    if (hasFallbackSignal || !hasSourceUrls) {
+      return AssistantReplyResult(
+        message: ChatMessage.assistant(
+          _buildSearchResultsReply(
+            payload: fallbackWebPayload,
+            userQuery: latestUserInput,
+          ),
+        ),
+        profile: nextProfile,
+        account: nextAccount,
+        contextMessages: contextMessages,
+      );
+    }
+
     return AssistantReplyResult(
       message: ChatMessage.assistant(secondAssistantText),
       profile: nextProfile,
@@ -294,7 +410,7 @@ class ChatService {
     _lanGatewayClient.dispose();
   }
 
-  Future<String?> _buildWebContext({
+  Future<_WebContextPayload?> _buildWebContextPayload({
     required ChatSettings settings,
     required String userQuery,
   }) async {
@@ -347,13 +463,22 @@ class ChatService {
       }
     }
 
-    return _formatWebContext(
+    final context = _formatWebContext(
       results: collected,
       containsUrl: containsUrl,
       urlDataLoaded: urlDataLoaded,
       searchQuery: searchQuery,
       searchDataLoaded: searchDataLoaded,
       searchErrorMessage: searchErrorMessage,
+    );
+    final hasReliableData = containsUrl ? urlDataLoaded : searchDataLoaded;
+    return _WebContextPayload(
+      context: context,
+      containsUrl: containsUrl,
+      hasReliableData: hasReliableData,
+      searchQuery: searchQuery,
+      searchErrorMessage: searchErrorMessage,
+      results: List<WebSearchResult>.unmodifiable(collected),
     );
   }
 
@@ -438,6 +563,158 @@ class ChatService {
     return buffer.toString().trim();
   }
 
+  String _buildWebUnavailableReply({
+    required _WebContextPayload? payload,
+    required String userQuery,
+  }) {
+    final normalizedQuery = userQuery.trim();
+    if (payload == null) {
+      return 'Не удалось получить веб-данные для запроса "$normalizedQuery". '
+          'Я не буду импровизировать. Проверьте интернет, доступ к сайту и попробуйте снова.';
+    }
+
+    if (payload.containsUrl) {
+      final first = payload.results.isNotEmpty ? payload.results.first : null;
+      final error = first == null ? '' : _extractErrorLine(first.snippet);
+      if (error.isNotEmpty) {
+        return 'Не удалось открыть ссылку и получить проверяемые данные: $error\n'
+            'Я не буду импровизировать. Попробуйте позже или пришлите текст страницы.';
+      }
+      return 'Не удалось открыть ссылку и получить проверяемые данные. '
+          'Я не буду импровизировать. Попробуйте позже или пришлите текст страницы.';
+    }
+
+    final searchQuery = payload.searchQuery?.trim();
+    final details = payload.searchErrorMessage?.trim();
+    final title = searchQuery == null || searchQuery.isEmpty
+        ? normalizedQuery
+        : searchQuery;
+    if (details != null && details.isNotEmpty) {
+      return 'По веб-поиску "$title" не удалось получить надежные источники: $details\n'
+          'Я не буду импровизировать. Повторите запрос позже.';
+    }
+    return 'По веб-поиску "$title" не удалось получить надежные источники. '
+        'Я не буду импровизировать. Уточните запрос или повторите позже.';
+  }
+
+  String _buildDirectUrlReply(_WebContextPayload payload) {
+    final result = payload.results.firstWhere(
+      (item) => !item.isError,
+      orElse: () => payload.results.first,
+    );
+    final snippet = result.snippet.trim();
+    final content = _extractContentBlock(snippet);
+    final briefContent = content.isEmpty
+        ? 'Надежные текстовые данные не извлечены.'
+        : _truncateText(content, 520);
+
+    final buffer = StringBuffer();
+    buffer.writeln('Проверил ссылку по реальным веб-данным.');
+    buffer.writeln('URL: ${result.url}');
+    buffer.writeln('Заголовок: ${result.title}');
+    buffer.writeln('Данные: $briefContent');
+    buffer.writeln(
+      'Это все подтвержденные данные, которые удалось извлечь без домыслов.',
+    );
+    return buffer.toString().trim();
+  }
+
+  String _buildSearchResultsReply({
+    required _WebContextPayload payload,
+    required String userQuery,
+  }) {
+    final reliable = payload.results
+        .where((item) => !item.isError)
+        .take(4)
+        .toList(growable: false);
+    if (reliable.isEmpty) {
+      return _buildWebUnavailableReply(payload: payload, userQuery: userQuery);
+    }
+
+    final buffer = StringBuffer();
+    buffer.writeln(
+      'Показываю только подтвержденные веб-данные без импровизации:',
+    );
+    for (var i = 0; i < reliable.length; i++) {
+      final item = reliable[i];
+      buffer.writeln('${i + 1}) ${item.title}');
+      buffer.writeln('URL: ${item.url}');
+      final preview = _extractBestSnippet(item.snippet);
+      if (preview.isNotEmpty) {
+        buffer.writeln('Фрагмент: ${_truncateText(preview, 220)}');
+      }
+    }
+    return buffer.toString().trim();
+  }
+
+  bool _containsAnySourceUrl(String text, List<WebSearchResult> results) {
+    if (results.isEmpty) {
+      return false;
+    }
+    final normalized = text.toLowerCase();
+    for (final result in results) {
+      final url = result.url.trim().toLowerCase();
+      if (url.isNotEmpty && normalized.contains(url)) {
+        return true;
+      }
+      final host = _extractHost(url);
+      if (host.isNotEmpty && normalized.contains(host)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _extractHost(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return '';
+    }
+    return uri.host.toLowerCase();
+  }
+
+  String _extractErrorLine(String snippet) {
+    for (final line in snippet.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.toUpperCase().startsWith('ERROR:')) {
+        return trimmed.substring(6).trim();
+      }
+    }
+    return '';
+  }
+
+  String _extractContentBlock(String snippet) {
+    final marker = 'CONTENT:';
+    final index = snippet.indexOf(marker);
+    if (index < 0) {
+      return _extractBestSnippet(snippet);
+    }
+    return snippet.substring(index + marker.length).trim();
+  }
+
+  String _extractBestSnippet(String snippet) {
+    final lines = snippet
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .where(
+          (line) =>
+              !line.toUpperCase().startsWith('URL:') &&
+              !line.toUpperCase().startsWith('TITLE:') &&
+              !line.toUpperCase().startsWith('ERROR:') &&
+              !line.toUpperCase().startsWith('CONTENT:'),
+        )
+        .toList(growable: false);
+    return lines.join(' ').trim();
+  }
+
+  String _truncateText(String text, int maxChars) {
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return '${text.substring(0, maxChars)}...';
+  }
+
   String _twoDigits(int value) {
     if (value < 10) {
       return '0$value';
@@ -448,7 +725,8 @@ class ChatService {
   static const String _webModeInstruction =
       'Режим веб-доступа включен по запросу пользователя (ссылка или явная команда посмотреть в интернете). '
       'У тебя есть доступ к интернет-данным через блок "Контекст из интернета". '
-      'Отвечай строго по этому блоку, не придумывай факты и используй только факты из контекста.';
+      'Отвечай строго по этому блоку, не придумывай факты и используй только факты из контекста. '
+      'В конце обязательно добавь раздел "Источники:" и укажи URL из веб-контекста.';
 
   static const String _webFallbackInstruction =
       'Предыдущий ответ был недостаточно уверенным. Сформируй новый финальный ответ только на основе веб-контекста. '
@@ -492,6 +770,24 @@ class ChatService {
     'no access to internet',
     'need web access',
   ];
+}
+
+class _WebContextPayload {
+  const _WebContextPayload({
+    required this.context,
+    required this.containsUrl,
+    required this.hasReliableData,
+    required this.searchQuery,
+    required this.searchErrorMessage,
+    required this.results,
+  });
+
+  final String context;
+  final bool containsUrl;
+  final bool hasReliableData;
+  final String? searchQuery;
+  final String? searchErrorMessage;
+  final List<WebSearchResult> results;
 }
 
 class AssistantReplyResult {
