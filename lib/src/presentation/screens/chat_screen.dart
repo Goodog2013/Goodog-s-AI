@@ -1430,10 +1430,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 if (!controller.autoContextRefreshEnabled)
                   IconButton(
-                    tooltip: 'Обновить контекст',
+                    tooltip: 'Сбросить память ИИ и обновить контекст',
                     onPressed: () {
                       unawaited(controller.refreshContextForActiveThread());
-                      _showSnack('Контекст этого чата обновлен вручную.');
+                      _showSnack(
+                        'Память ИИ для этого чата сброшена. Лимит контекста начат заново.',
+                      );
                     },
                     icon: const Icon(Icons.refresh_rounded),
                   ),
@@ -1461,7 +1463,7 @@ class _ChatScreenState extends State<ChatScreen> {
         '${controller.activeContextMessagesCount}/${controller.limits.maxContextMessages}';
     final contextMode = controller.autoContextRefreshEnabled
         ? 'авто-контекст'
-        : 'ручной контекст';
+        : 'ручной контекст (до сброса)';
     final tier = controller.profile.plan.title;
     final mark = controller.activeThread.isFavorite ? ' • избранный' : '';
     return '$folderName • $tier • $contextMode $contextInfo$mark';
@@ -1476,9 +1478,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final max = controller.limits.maxContextMessages;
     final ratio = max <= 0 ? 0.0 : (current / max).clamp(0.0, 1.0);
     final label = current > 99 ? '99+' : current.toString();
+    final tooltip = controller.autoContextRefreshEnabled
+        ? 'Контекст: $current/$max'
+        : 'Лимит отправок до сброса памяти: $current/$max';
 
     return Tooltip(
-      message: 'Контекст: $current/$max',
+      message: tooltip,
       child: SizedBox(
         width: 34,
         height: 34,
@@ -1557,7 +1562,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'Автообновление контекста недоступно на текущем тарифе. Используйте кнопку обновления в заголовке чата.',
+                            'Лимит контекста ограничен тарифом. Когда круг достигнет максимума, нажмите кнопку обновления в заголовке, чтобы сбросить память ИИ и начать контекст заново.',
                             style: Theme.of(context).textTheme.bodySmall
                                 ?.copyWith(color: colors.onSecondaryContainer),
                           ),

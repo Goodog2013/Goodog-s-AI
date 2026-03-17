@@ -31,6 +31,7 @@ class ChatController extends ChangeNotifier {
   AuthAccount? _account;
 
   final Map<String, List<ChatMessage>> _frozenContextByThread = {};
+  final Map<String, int> _manualTurnsByThread = {};
 
   bool _isInitialized = false;
   bool _isLoading = false;
@@ -57,40 +58,13 @@ class ChatController extends ChangeNotifier {
   bool get autoContextRefreshEnabled => limits.autoContextRefresh;
   int get activeContextMessagesCount {
     final maxContextMessages = limits.maxContextMessages;
-    final conversationNonSystem = activeThread.messages
-        .where((m) => m.role != ChatRole.system)
-        .toList(growable: false);
-
     if (limits.autoContextRefresh) {
+      final conversationNonSystem = activeThread.messages
+          .where((m) => m.role != ChatRole.system)
+          .toList(growable: false);
       return conversationNonSystem.length.clamp(0, maxContextMessages);
     }
-
-    final frozen = _frozenContextByThread[activeThread.id];
-    if (frozen == null || frozen.isEmpty) {
-      return conversationNonSystem.length.clamp(0, maxContextMessages);
-    }
-
-    final merged = frozen
-        .where((m) => m.role != ChatRole.system)
-        .toList(growable: true);
-    final mergedIds = merged.map((m) => m.id).toSet();
-
-    final tailCount = conversationNonSystem.length >= 2
-        ? 2
-        : conversationNonSystem.length;
-    final start = conversationNonSystem.length - tailCount;
-    for (var i = start; i < conversationNonSystem.length; i++) {
-      final item = conversationNonSystem[i];
-      if (!mergedIds.contains(item.id)) {
-        merged.add(item);
-        mergedIds.add(item.id);
-      }
-    }
-
-    if (merged.length > maxContextMessages) {
-      return maxContextMessages;
-    }
-    return merged.length;
+    return _manualTurnsUsed(activeThread.id).clamp(0, maxContextMessages);
   }
 
   bool get canCreateFolder => _workspace.folders.length < limits.maxFolders;
@@ -407,6 +381,7 @@ class ChatController extends ChangeNotifier {
     await _commitWorkspace(nextWorkspace);
     if (!limits.autoContextRefresh) {
       _frozenContextByThread[newThread.id] = const <ChatMessage>[];
+      _manualTurnsByThread[newThread.id] = 0;
     }
   }
 
@@ -458,6 +433,7 @@ class ChatController extends ChangeNotifier {
     }
 
     _frozenContextByThread.remove(threadId);
+    _manualTurnsByThread.remove(threadId);
 
     final currentActive = _workspace.activeThreadId;
     final nextActive = currentActive == threadId
@@ -601,6 +577,7 @@ class ChatController extends ChangeNotifier {
       updatedAt: DateTime.now(),
     );
     _frozenContextByThread.remove(clearedThread.id);
+    _manualTurnsByThread.remove(clearedThread.id);
     final updatedThreads = _workspace.threads
         .map((thread) => thread.id == clearedThread.id ? clearedThread : thread)
         .toList(growable: false);
@@ -608,11 +585,8 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> refreshContextForActiveThread() async {
-    final trimmed = _trimContext(
-      activeThread.messages,
-      max: limits.maxContextMessages,
-    );
-    _frozenContextByThread[activeThread.id] = trimmed;
+    _frozenContextByThread[activeThread.id] = const <ChatMessage>[];
+    _manualTurnsByThread[activeThread.id] = 0;
     _lastError = null;
     notifyListeners();
   }
@@ -635,6 +609,16 @@ class ChatController extends ChangeNotifier {
       notifyListeners();
       return _lastError;
     }
+    if (!limits.autoContextRefresh) {
+      final usedTurns = _manualTurnsUsed(activeThread.id);
+      final maxTurns = limits.maxContextMessages;
+      if (usedTurns >= maxTurns) {
+        _lastError =
+            'Лимит контекста достигнут ($usedTurns/$maxTurns). Нажмите «Обновить контекст», чтобы сбросить память ИИ.';
+        notifyListeners();
+        return _lastError;
+      }
+    }
 
     _lastError = null;
     final now = DateTime.now();
@@ -655,14 +639,13 @@ class ChatController extends ChangeNotifier {
 
       final List<ChatMessage>? fixedContext = limits.autoContextRefresh
           ? null
-          : (_frozenContextByThread[updatedThread.id] ??
-                _trimContext(
-                  updatedThread.messages,
-                  max: limits.maxContextMessages,
-                ));
-      if (fixedContext != null) {
-        _frozenContextByThread[updatedThread.id] = fixedContext;
-      }
+          : _appendManualMessage(
+              base:
+                  _frozenContextByThread[updatedThread.id] ??
+                  const <ChatMessage>[],
+              message: userMessage,
+              maxTurns: limits.maxContextMessages,
+            );
 
       final assistantResult = await _chatService.getAssistantReply(
         settings: _settings,
@@ -685,6 +668,17 @@ class ChatController extends ChangeNotifier {
         messages: [...updatedThread.messages, assistantResult.message],
         updatedAt: DateTime.now(),
       );
+      if (!limits.autoContextRefresh && fixedContext != null) {
+        final nextManualContext = _appendManualMessage(
+          base: fixedContext,
+          message: assistantResult.message,
+          maxTurns: limits.maxContextMessages,
+        );
+        _frozenContextByThread[updatedThread.id] = nextManualContext;
+        _manualTurnsByThread[updatedThread.id] = _countUserMessages(
+          nextManualContext,
+        );
+      }
       _workspace = _replaceThread(withAssistant);
       await _chatService.saveWorkspace(_workspace);
       return null;
@@ -704,17 +698,62 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  List<ChatMessage> _trimContext(
-    List<ChatMessage> messages, {
-    required int max,
-  }) {
-    final nonSystem = messages
-        .where((m) => m.role != ChatRole.system)
-        .toList(growable: false);
-    if (nonSystem.length <= max) {
-      return nonSystem;
+  int _manualTurnsUsed(String threadId) {
+    final cached = _manualTurnsByThread[threadId];
+    if (cached != null) {
+      return cached;
     }
-    return nonSystem.sublist(nonSystem.length - max, nonSystem.length);
+
+    final frozen = _frozenContextByThread[threadId];
+    if (frozen == null || frozen.isEmpty) {
+      _manualTurnsByThread[threadId] = 0;
+      return 0;
+    }
+
+    final turns = _countUserMessages(
+      frozen,
+    ).clamp(0, limits.maxContextMessages);
+    _manualTurnsByThread[threadId] = turns;
+    return turns;
+  }
+
+  List<ChatMessage> _appendManualMessage({
+    required List<ChatMessage> base,
+    required ChatMessage message,
+    required int maxTurns,
+  }) {
+    final merged = <ChatMessage>[
+      ...base.where((m) => m.role != ChatRole.system),
+      message,
+    ];
+    return _trimManualContextByTurns(merged, maxTurns: maxTurns);
+  }
+
+  List<ChatMessage> _trimManualContextByTurns(
+    List<ChatMessage> messages, {
+    required int maxTurns,
+  }) {
+    if (maxTurns <= 0) {
+      return const <ChatMessage>[];
+    }
+
+    final queue = messages
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: true);
+    while (_countUserMessages(queue) > maxTurns && queue.isNotEmpty) {
+      queue.removeAt(0);
+    }
+    return List<ChatMessage>.unmodifiable(queue);
+  }
+
+  int _countUserMessages(List<ChatMessage> messages) {
+    var count = 0;
+    for (final message in messages) {
+      if (message.role == ChatRole.user) {
+        count++;
+      }
+    }
+    return count;
   }
 
   void stopGenerating() {

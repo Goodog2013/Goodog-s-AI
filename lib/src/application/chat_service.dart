@@ -269,36 +269,12 @@ class ChatService {
     required bool autoContextRefresh,
     List<ChatMessage>? fixedContext,
   }) {
-    final conversationNonSystem = conversation
+    final source = autoContextRefresh
+        ? conversation
+        : (fixedContext ?? const <ChatMessage>[]);
+    final nonSystem = source
         .where((m) => m.role != ChatRole.system)
         .toList(growable: false);
-
-    List<ChatMessage> nonSystem;
-    if (!autoContextRefresh && fixedContext != null) {
-      final frozen = fixedContext
-          .where((m) => m.role != ChatRole.system)
-          .toList(growable: true);
-      final frozenIds = frozen.map((m) => m.id).toSet();
-
-      // Even in manual context mode we always add recent exchange tail
-      // so the current user question is not lost.
-      final tailCount = conversationNonSystem.length >= 2
-          ? 2
-          : conversationNonSystem.length;
-      final tail = conversationNonSystem.sublist(
-        conversationNonSystem.length - tailCount,
-      );
-      for (final item in tail) {
-        if (!frozenIds.contains(item.id)) {
-          frozen.add(item);
-          frozenIds.add(item.id);
-        }
-      }
-      nonSystem = frozen;
-    } else {
-      nonSystem = conversationNonSystem;
-    }
-
     if (nonSystem.length <= maxContextMessages) {
       return nonSystem;
     }
