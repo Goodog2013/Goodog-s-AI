@@ -6,6 +6,7 @@ class ChatThread {
     required this.title,
     required this.folderId,
     required this.messages,
+    required this.manualContextStartCount,
     required this.createdAt,
     required this.updatedAt,
     required this.isFavorite,
@@ -15,6 +16,7 @@ class ChatThread {
   final String title;
   final String? folderId;
   final List<ChatMessage> messages;
+  final int manualContextStartCount;
   final DateTime createdAt;
   final DateTime updatedAt;
   final bool isFavorite;
@@ -26,6 +28,7 @@ class ChatThread {
       title: title.trim().isEmpty ? 'Новый чат' : title.trim(),
       folderId: folderId,
       messages: const [],
+      manualContextStartCount: 0,
       createdAt: now,
       updatedAt: now,
       isFavorite: false,
@@ -41,12 +44,23 @@ class ChatThread {
               .map((item) => ChatMessage.fromJson(item.cast<String, dynamic>()))
               .toList(growable: false)
         : const <ChatMessage>[];
+    final parsedNonSystemCount = parsedMessages
+        .where((message) => message.role != ChatRole.system)
+        .length;
+    final rawManualStart = json['manualContextStartCount'];
+    final manualContextStartCount = rawManualStart is int
+        ? rawManualStart
+        : parsedNonSystemCount;
 
     return ChatThread(
       id: json['id'] as String? ?? _generateId(),
       title: json['title'] as String? ?? 'Чат',
       folderId: json['folderId'] as String?,
       messages: parsedMessages,
+      manualContextStartCount: manualContextStartCount.clamp(
+        0,
+        parsedNonSystemCount,
+      ),
       createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? now,
       updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? now,
       isFavorite: json['isFavorite'] as bool? ?? false,
@@ -59,6 +73,7 @@ class ChatThread {
     String? folderId,
     bool clearFolder = false,
     List<ChatMessage>? messages,
+    int? manualContextStartCount,
     DateTime? createdAt,
     DateTime? updatedAt,
     bool? isFavorite,
@@ -68,6 +83,8 @@ class ChatThread {
       title: title ?? this.title,
       folderId: clearFolder ? null : (folderId ?? this.folderId),
       messages: messages ?? this.messages,
+      manualContextStartCount:
+          manualContextStartCount ?? this.manualContextStartCount,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       isFavorite: isFavorite ?? this.isFavorite,
@@ -93,6 +110,7 @@ class ChatThread {
       'title': title,
       'folderId': folderId,
       'messages': messages.map((message) => message.toJson()).toList(),
+      'manualContextStartCount': manualContextStartCount,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
       'isFavorite': isFavorite,

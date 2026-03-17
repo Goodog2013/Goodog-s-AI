@@ -30,9 +30,6 @@ class ChatController extends ChangeNotifier {
   );
   AuthAccount? _account;
 
-  final Map<String, List<ChatMessage>> _frozenContextByThread = {};
-  final Map<String, int> _manualTurnsByThread = {};
-
   bool _isInitialized = false;
   bool _isLoading = false;
   bool _isAuthenticated = false;
@@ -64,7 +61,7 @@ class ChatController extends ChangeNotifier {
           .toList(growable: false);
       return conversationNonSystem.length.clamp(0, maxContextMessages);
     }
-    return _manualTurnsUsed(activeThread.id).clamp(0, maxContextMessages);
+    return _manualTurnsUsed(activeThread).clamp(0, maxContextMessages);
   }
 
   bool get canCreateFolder => _workspace.folders.length < limits.maxFolders;
@@ -379,10 +376,6 @@ class ChatController extends ChangeNotifier {
       selectedFolderId: newThread.folderId,
     );
     await _commitWorkspace(nextWorkspace);
-    if (!limits.autoContextRefresh) {
-      _frozenContextByThread[newThread.id] = const <ChatMessage>[];
-      _manualTurnsByThread[newThread.id] = 0;
-    }
   }
 
   Future<void> renameThread({
@@ -431,9 +424,6 @@ class ChatController extends ChangeNotifier {
     if (remaining.isEmpty) {
       return;
     }
-
-    _frozenContextByThread.remove(threadId);
-    _manualTurnsByThread.remove(threadId);
 
     final currentActive = _workspace.activeThreadId;
     final nextActive = currentActive == threadId
@@ -574,10 +564,9 @@ class ChatController extends ChangeNotifier {
   Future<void> clearHistory() async {
     final clearedThread = activeThread.copyWith(
       messages: const [],
+      manualContextStartCount: 0,
       updatedAt: DateTime.now(),
     );
-    _frozenContextByThread.remove(clearedThread.id);
-    _manualTurnsByThread.remove(clearedThread.id);
     final updatedThreads = _workspace.threads
         .map((thread) => thread.id == clearedThread.id ? clearedThread : thread)
         .toList(growable: false);
@@ -585,8 +574,13 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> refreshContextForActiveThread() async {
-    _frozenContextByThread[activeThread.id] = const <ChatMessage>[];
-    _manualTurnsByThread[activeThread.id] = 0;
+    final nonSystemCount = _nonSystemMessages(activeThread.messages).length;
+    final refreshedThread = activeThread.copyWith(
+      manualContextStartCount: nonSystemCount,
+      updatedAt: DateTime.now(),
+    );
+    _workspace = _replaceThread(refreshedThread);
+    await _chatService.saveWorkspace(_workspace);
     _lastError = null;
     notifyListeners();
   }
@@ -610,7 +604,7 @@ class ChatController extends ChangeNotifier {
       return _lastError;
     }
     if (!limits.autoContextRefresh) {
-      final usedTurns = _manualTurnsUsed(activeThread.id);
+      final usedTurns = _manualTurnsUsed(activeThread);
       final maxTurns = limits.maxContextMessages;
       if (usedTurns >= maxTurns) {
         _lastError =
@@ -624,9 +618,11 @@ class ChatController extends ChangeNotifier {
     final now = DateTime.now();
     final userMessage = ChatMessage.user(text);
     final title = _deriveTitle(activeThread.title, text);
+    final manualContextStartCount = activeThread.manualContextStartCount;
     final updatedThread = activeThread.copyWith(
       title: title,
       messages: [...activeThread.messages, userMessage],
+      manualContextStartCount: manualContextStartCount,
       updatedAt: now,
     );
 
@@ -639,13 +635,7 @@ class ChatController extends ChangeNotifier {
 
       final List<ChatMessage>? fixedContext = limits.autoContextRefresh
           ? null
-          : _appendManualMessage(
-              base:
-                  _frozenContextByThread[updatedThread.id] ??
-                  const <ChatMessage>[],
-              message: userMessage,
-              maxTurns: limits.maxContextMessages,
-            );
+          : _manualContextMessages(updatedThread);
 
       final assistantResult = await _chatService.getAssistantReply(
         settings: _settings,
@@ -666,19 +656,9 @@ class ChatController extends ChangeNotifier {
 
       final withAssistant = updatedThread.copyWith(
         messages: [...updatedThread.messages, assistantResult.message],
+        manualContextStartCount: updatedThread.manualContextStartCount,
         updatedAt: DateTime.now(),
       );
-      if (!limits.autoContextRefresh && fixedContext != null) {
-        final nextManualContext = _appendManualMessage(
-          base: fixedContext,
-          message: assistantResult.message,
-          maxTurns: limits.maxContextMessages,
-        );
-        _frozenContextByThread[updatedThread.id] = nextManualContext;
-        _manualTurnsByThread[updatedThread.id] = _countUserMessages(
-          nextManualContext,
-        );
-      }
       _workspace = _replaceThread(withAssistant);
       await _chatService.saveWorkspace(_workspace);
       return null;
@@ -698,52 +678,20 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  int _manualTurnsUsed(String threadId) {
-    final cached = _manualTurnsByThread[threadId];
-    if (cached != null) {
-      return cached;
-    }
-
-    final frozen = _frozenContextByThread[threadId];
-    if (frozen == null || frozen.isEmpty) {
-      _manualTurnsByThread[threadId] = 0;
-      return 0;
-    }
-
-    final turns = _countUserMessages(
-      frozen,
-    ).clamp(0, limits.maxContextMessages);
-    _manualTurnsByThread[threadId] = turns;
-    return turns;
+  int _manualTurnsUsed(ChatThread thread) {
+    return _countUserMessages(_manualContextMessages(thread));
   }
 
-  List<ChatMessage> _appendManualMessage({
-    required List<ChatMessage> base,
-    required ChatMessage message,
-    required int maxTurns,
-  }) {
-    final merged = <ChatMessage>[
-      ...base.where((m) => m.role != ChatRole.system),
-      message,
-    ];
-    return _trimManualContextByTurns(merged, maxTurns: maxTurns);
+  List<ChatMessage> _manualContextMessages(ChatThread thread) {
+    final nonSystem = _nonSystemMessages(thread.messages);
+    final start = thread.manualContextStartCount.clamp(0, nonSystem.length);
+    return nonSystem.sublist(start, nonSystem.length);
   }
 
-  List<ChatMessage> _trimManualContextByTurns(
-    List<ChatMessage> messages, {
-    required int maxTurns,
-  }) {
-    if (maxTurns <= 0) {
-      return const <ChatMessage>[];
-    }
-
-    final queue = messages
-        .where((m) => m.role != ChatRole.system)
-        .toList(growable: true);
-    while (_countUserMessages(queue) > maxTurns && queue.isNotEmpty) {
-      queue.removeAt(0);
-    }
-    return List<ChatMessage>.unmodifiable(queue);
+  List<ChatMessage> _nonSystemMessages(List<ChatMessage> messages) {
+    return messages
+        .where((message) => message.role != ChatRole.system)
+        .toList(growable: false);
   }
 
   int _countUserMessages(List<ChatMessage> messages) {
