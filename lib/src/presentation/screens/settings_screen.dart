@@ -26,6 +26,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _baseUrlController;
   late final TextEditingController _modelController;
   late final TextEditingController _systemPromptController;
+  late final TextEditingController _profileNameController;
+  late final TextEditingController _profileIdController;
+  late final TextEditingController _lanGatewayUrlController;
 
   late double _temperature;
   late bool _webSearchEnabled;
@@ -33,6 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late String _languageCode;
   late AppThemeMode _themeMode;
   late AppColorPalette _palette;
+  late bool _lanGatewayEnabled;
 
   bool _isSaving = false;
   bool _isClearing = false;
@@ -44,12 +48,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlController = TextEditingController(text: initial.baseUrl);
     _modelController = TextEditingController(text: initial.model);
     _systemPromptController = TextEditingController(text: initial.systemPrompt);
+    _profileNameController = TextEditingController(text: initial.profileName);
+    _profileIdController = TextEditingController(text: initial.profileId);
+    _lanGatewayUrlController = TextEditingController(
+      text: initial.lanGatewayUrl,
+    );
     _temperature = initial.temperature;
     _webSearchEnabled = initial.webSearchEnabled;
     _webSearchMaxResults = initial.webSearchMaxResults.toDouble();
     _languageCode = initial.languageCode;
     _themeMode = initial.themeMode;
     _palette = initial.palette;
+    _lanGatewayEnabled = initial.lanGatewayEnabled;
   }
 
   @override
@@ -57,6 +67,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _baseUrlController.dispose();
     _modelController.dispose();
     _systemPromptController.dispose();
+    _profileNameController.dispose();
+    _profileIdController.dispose();
+    _lanGatewayUrlController.dispose();
     super.dispose();
   }
 
@@ -82,6 +95,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       languageCode: _languageCode,
       themeMode: _themeMode,
       palette: _palette,
+      profileId: _profileIdController.text.trim(),
+      profileName: _profileNameController.text.trim(),
+      lanGatewayEnabled: _lanGatewayEnabled,
+      lanGatewayUrl: _lanGatewayUrlController.text.trim(),
     );
 
     try {
@@ -180,6 +197,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _validateModel(String? value) {
     if ((value ?? '').trim().isEmpty) {
       return _i18n.t('modelRequired');
+    }
+    return null;
+  }
+
+  String? _validateLanGatewayUrl(String? value) {
+    if (!_lanGatewayEnabled) {
+      return null;
+    }
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) {
+      return 'Укажите URL LAN-шлюза.';
+    }
+    final uri = Uri.tryParse(text);
+    if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+      return 'Некорректный URL LAN-шлюза.';
     }
     return null;
   }
@@ -416,6 +448,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 12),
                   _buildSection(
                     order: 2,
+                    title: 'Профиль и доступ',
+                    subtitle:
+                        'Профиль используется для прав (Free/Plus/Max), бана и очереди запросов по локальной сети.',
+                    child: Column(
+                      children: [
+                        TextFormField(
+                          controller: _profileNameController,
+                          decoration: const InputDecoration(
+                            labelText: 'Имя профиля',
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _profileIdController,
+                          readOnly: true,
+                          decoration: const InputDecoration(
+                            labelText: 'ID профиля',
+                            helperText:
+                                'Генерируется автоматически. По нему админ меняет права.',
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('LAN-шлюз (очередь + права)'),
+                          subtitle: const Text(
+                            'Включите, чтобы запросы шли через локальный сервер-очередь с приоритетами.',
+                          ),
+                          value: _lanGatewayEnabled,
+                          onChanged: (value) {
+                            setState(() {
+                              _lanGatewayEnabled = value;
+                            });
+                          },
+                        ),
+                        if (_lanGatewayEnabled) ...[
+                          const SizedBox(height: 6),
+                          TextFormField(
+                            controller: _lanGatewayUrlController,
+                            decoration: const InputDecoration(
+                              labelText: 'URL LAN-шлюза',
+                              hintText: 'http://192.168.1.10:8088',
+                            ),
+                            validator: _validateLanGatewayUrl,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _buildSection(
+                    order: 3,
                     title: i18n.t('generation'),
                     subtitle: i18n.t('generationSubtitle'),
                     child: Column(

@@ -1,10 +1,12 @@
 import '../data/local/chat_workspace_local_data_source.dart';
+import '../data/remote/lan_gateway_client.dart';
 import '../data/remote/lm_studio_api_client.dart';
 import '../data/remote/web_search_client.dart';
 import '../models/app_language.dart';
 import '../models/chat_message.dart';
 import '../models/chat_settings.dart';
 import '../models/chat_workspace.dart';
+import '../models/user_profile.dart';
 import '../models/web_search_result.dart';
 import 'web_intent_parser.dart';
 
@@ -13,13 +15,16 @@ class ChatService {
     required LmStudioApiClient apiClient,
     required ChatWorkspaceLocalDataSource workspaceDataSource,
     WebSearchClient? webSearchClient,
+    LanGatewayClient? lanGatewayClient,
   }) : _apiClient = apiClient,
        _workspaceDataSource = workspaceDataSource,
-       _webSearchClient = webSearchClient ?? WebSearchClient();
+       _webSearchClient = webSearchClient ?? WebSearchClient(),
+       _lanGatewayClient = lanGatewayClient ?? LanGatewayClient();
 
   final LmStudioApiClient _apiClient;
   final ChatWorkspaceLocalDataSource _workspaceDataSource;
   final WebSearchClient _webSearchClient;
+  final LanGatewayClient _lanGatewayClient;
 
   Future<ChatWorkspace> loadWorkspace() {
     return _workspaceDataSource.loadWorkspace();
@@ -29,10 +34,45 @@ class ChatService {
     return _workspaceDataSource.saveWorkspace(workspace);
   }
 
-  Future<ChatMessage> getAssistantReply({
+  Future<UserProfile> syncProfile({required ChatSettings settings}) async {
+    final profileId = settings.profileId.trim();
+    final profileName = settings.profileName.trim();
+    final localProfile = UserProfile.initial(
+      id: profileId.isEmpty ? 'local_user' : profileId,
+      name: profileName.isEmpty ? ChatSettings.defaultProfileName : profileName,
+    );
+
+    if (!settings.lanGatewayEnabled) {
+      return localProfile;
+    }
+
+    try {
+      return await _lanGatewayClient.syncProfile(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+        profileId: localProfile.id,
+        profileName: localProfile.displayName,
+      );
+    } on LanGatewayException catch (error) {
+      if (error.isCancelled) {
+        throw const ChatApiException(
+          LmStudioApiClient.cancelledByUserMessage,
+          isCancelled: true,
+        );
+      }
+      throw ChatApiException(error.message);
+    }
+  }
+
+  Future<AssistantReplyResult> getAssistantReply({
     required ChatSettings settings,
+    required UserProfile profile,
     required List<ChatMessage> conversation,
+    List<ChatMessage>? fixedContext,
   }) async {
+    if (profile.isBanned) {
+      throw const ChatApiException('Ваш профиль заблокирован администратором.');
+    }
+
     final prompt = settings.systemPrompt.trim();
     final latestUserInput = _latestUserMessage(conversation);
     final answerLanguage = AppLanguage.byCode(
@@ -45,6 +85,13 @@ class ChatService {
     final webContext = shouldUseWebByIntent
         ? await _buildWebContext(settings: settings, userQuery: latestUserInput)
         : null;
+
+    final contextMessages = _buildContextMessages(
+      conversation: conversation,
+      fixedContext: fixedContext,
+      maxContextMessages: profile.limits.maxContextMessages,
+      autoContextRefresh: profile.limits.autoContextRefresh,
+    );
 
     final baseSystemMessages = <ChatMessage>[
       if (prompt.isNotEmpty) ChatMessage.system(prompt),
@@ -59,21 +106,42 @@ class ChatService {
       ...baseSystemMessages,
       if (shouldUseWebByIntent) ChatMessage.system(_webModeInstruction),
       if (webContext != null) ChatMessage.system(webContext),
-      ...conversation.where((message) => message.role != ChatRole.system),
+      ...contextMessages,
     ];
 
-    final firstAssistantText = await _apiClient.createChatCompletion(
-      settings: settings,
-      messages: requestMessages,
-    );
+    String firstAssistantText;
+    UserProfile nextProfile = profile;
+    if (settings.lanGatewayEnabled) {
+      final gatewayResult = await _lanGatewayRequest(
+        settings: settings,
+        profile: profile,
+        messages: requestMessages,
+      );
+      firstAssistantText = gatewayResult.reply;
+      nextProfile = gatewayResult.profile;
+    } else {
+      firstAssistantText = await _apiClient.createChatCompletion(
+        settings: settings,
+        messages: requestMessages,
+      );
+    }
+
     if (!settings.webSearchEnabled || latestUserInput == null) {
-      return ChatMessage.assistant(firstAssistantText);
+      return AssistantReplyResult(
+        message: ChatMessage.assistant(firstAssistantText),
+        profile: nextProfile,
+        contextMessages: contextMessages,
+      );
     }
 
     final shouldRetryWithWeb =
         !shouldUseWebByIntent && _needsWebFallback(firstAssistantText);
     if (!shouldRetryWithWeb) {
-      return ChatMessage.assistant(firstAssistantText);
+      return AssistantReplyResult(
+        message: ChatMessage.assistant(firstAssistantText),
+        profile: nextProfile,
+        contextMessages: contextMessages,
+      );
     }
 
     final fallbackWebContext = await _buildWebContext(
@@ -85,24 +153,87 @@ class ChatService {
       ChatMessage.system(_webModeInstruction),
       ChatMessage.system(_webFallbackInstruction),
       if (fallbackWebContext != null) ChatMessage.system(fallbackWebContext),
-      ...conversation.where((message) => message.role != ChatRole.system),
+      ...contextMessages,
     ];
+
+    if (settings.lanGatewayEnabled) {
+      final gatewayResult = await _lanGatewayRequest(
+        settings: settings,
+        profile: nextProfile,
+        messages: retryMessages,
+      );
+      return AssistantReplyResult(
+        message: ChatMessage.assistant(gatewayResult.reply),
+        profile: gatewayResult.profile,
+        contextMessages: contextMessages,
+      );
+    }
 
     final secondAssistantText = await _apiClient.createChatCompletion(
       settings: settings,
       messages: retryMessages,
     );
+    return AssistantReplyResult(
+      message: ChatMessage.assistant(secondAssistantText),
+      profile: nextProfile,
+      contextMessages: contextMessages,
+    );
+  }
 
-    return ChatMessage.assistant(secondAssistantText);
+  Future<GatewayChatResult> _lanGatewayRequest({
+    required ChatSettings settings,
+    required UserProfile profile,
+    required List<ChatMessage> messages,
+  }) async {
+    try {
+      return await _lanGatewayClient.requestChat(
+        gatewayBaseUrl: settings.normalizedLanGatewayUrl,
+        profileId: profile.id,
+        profileName: profile.displayName,
+        model: settings.model,
+        temperature: settings.temperature,
+        messages: messages,
+      );
+    } on LanGatewayException catch (error) {
+      if (error.isCancelled) {
+        throw const ChatApiException(
+          LmStudioApiClient.cancelledByUserMessage,
+          isCancelled: true,
+        );
+      }
+      throw ChatApiException(error.message);
+    }
+  }
+
+  List<ChatMessage> _buildContextMessages({
+    required List<ChatMessage> conversation,
+    required int maxContextMessages,
+    required bool autoContextRefresh,
+    List<ChatMessage>? fixedContext,
+  }) {
+    final source = autoContextRefresh && fixedContext == null
+        ? conversation
+        : (fixedContext ?? conversation);
+    final nonSystem = source
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: false);
+    if (nonSystem.length <= maxContextMessages) {
+      return nonSystem;
+    }
+    return nonSystem
+        .sublist(nonSystem.length - maxContextMessages, nonSystem.length)
+        .toList(growable: false);
   }
 
   void cancelActiveReply() {
     _apiClient.cancelActiveRequest();
+    _lanGatewayClient.cancelActiveRequest();
   }
 
   void dispose() {
     _apiClient.dispose();
     _webSearchClient.dispose();
+    _lanGatewayClient.dispose();
   }
 
   Future<String?> _buildWebContext({
@@ -195,11 +326,10 @@ class ChatService {
 
     buffer.writeln('Контекст из интернета (дата: $date).');
     buffer.writeln(
-      'У тебя есть доступ к интернет-данным через этот блок. '
-      'Используй источники ниже как фактическую базу для ответа.',
+      'У тебя есть доступ к интернет-данным через этот блок. Используй источники ниже как фактическую базу для ответа.',
     );
     buffer.writeln(
-      'Если источник противоречивый, укажи это прямо и приведи ссылки.',
+      'Если источники противоречивы, укажи это прямо и приведи ссылки.',
     );
     buffer.writeln(
       'Отвечай только на основе этого контекста. Если данных недостаточно, прямо скажи об этом и не выдумывай.',
@@ -265,7 +395,7 @@ class ChatService {
 
   static const String _webFallbackInstruction =
       'Предыдущий ответ был недостаточно уверенным. Сформируй новый финальный ответ только на основе веб-контекста. '
-      'Если данных всё равно не хватает, прямо укажи это без импровизации.';
+      'Если данных все равно не хватает, прямо укажи это без импровизации.';
 
   static const String _noHallucinationInstruction =
       'Если не знаешь фактический ответ или не можешь его проверить, не импровизируй. '
@@ -305,4 +435,16 @@ class ChatService {
     'no access to internet',
     'need web access',
   ];
+}
+
+class AssistantReplyResult {
+  const AssistantReplyResult({
+    required this.message,
+    required this.profile,
+    required this.contextMessages,
+  });
+
+  final ChatMessage message;
+  final UserProfile profile;
+  final List<ChatMessage> contextMessages;
 }

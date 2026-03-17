@@ -8,6 +8,8 @@ import '../../models/chat_message.dart';
 import '../../models/chat_settings.dart';
 import '../../models/chat_thread.dart';
 import '../../models/chat_workspace.dart';
+import '../../models/plan_limits.dart';
+import '../../models/user_profile.dart';
 
 class ChatController extends ChangeNotifier {
   ChatController({
@@ -21,17 +23,41 @@ class ChatController extends ChangeNotifier {
 
   ChatWorkspace _workspace = ChatWorkspace.initial();
   ChatSettings _settings = ChatSettings.defaults();
+  UserProfile _profile = UserProfile.initial(
+    id: 'local_user',
+    name: ChatSettings.defaultProfileName,
+  );
+
+  final Map<String, List<ChatMessage>> _frozenContextByThread = {};
+
   bool _isInitialized = false;
   bool _isLoading = false;
   String? _lastError;
   String _searchQuery = '';
 
   ChatSettings get settings => _settings;
+  UserProfile get profile => _profile;
+  PlanLimits get limits => _profile.limits;
   bool get isInitialized => _isInitialized;
   bool get isLoading => _isLoading;
   String? get lastError => _lastError;
   String get searchQuery => _searchQuery;
   bool get hasSearchQuery => _searchQuery.trim().isNotEmpty;
+
+  bool get isCurrentUserBanned => _profile.isBanned;
+  bool get autoContextRefreshEnabled => limits.autoContextRefresh;
+  int get activeContextMessagesCount {
+    if (limits.autoContextRefresh) {
+      final nonSystemCount = activeThread.messages
+          .where((m) => m.role != ChatRole.system)
+          .length;
+      return nonSystemCount.clamp(0, limits.maxContextMessages);
+    }
+    return _frozenContextByThread[activeThread.id]?.length ?? 0;
+  }
+
+  bool get canCreateFolder => _workspace.folders.length < limits.maxFolders;
+  bool get canCreateThread => _workspace.threads.length < limits.maxChats;
 
   String? get selectedFolderId => _workspace.selectedFolderId;
   String get activeThreadId => _workspace.activeThreadId;
@@ -124,10 +150,18 @@ class ChatController extends ChangeNotifier {
 
     try {
       final loadedSettings = await _settingsService.loadSettings();
+      final normalizedSettings = await _settingsService.ensureProfileIdentity(
+        loadedSettings,
+      );
       final loadedWorkspace = await _chatService.loadWorkspace();
-      _settings = loadedSettings;
+      _settings = normalizedSettings;
       _workspace = loadedWorkspace;
+      _profile = UserProfile.initial(
+        id: _settings.profileId,
+        name: _settings.profileName,
+      );
       _lastError = null;
+      await syncProfile(notify: false);
     } catch (_) {
       _lastError = 'Не удалось загрузить локальные данные приложения.';
     } finally {
@@ -137,9 +171,31 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> applySettings(ChatSettings settings) async {
-    _settings = settings;
-    await _settingsService.saveSettings(settings);
+    final normalized = await _settingsService.ensureProfileIdentity(settings);
+    _settings = normalized;
+    await _settingsService.saveSettings(normalized);
+    await syncProfile(notify: false);
     notifyListeners();
+  }
+
+  Future<void> syncProfile({bool notify = true}) async {
+    try {
+      final synced = await _chatService.syncProfile(settings: _settings);
+      _profile = synced;
+      if (_profile.isBanned) {
+        _lastError = 'Ваш профиль заблокирован администратором.';
+      } else {
+        _lastError = null;
+      }
+    } on ChatApiException catch (error) {
+      _lastError = error.message;
+    } catch (_) {
+      _lastError = 'Не удалось синхронизировать профиль.';
+    } finally {
+      if (notify) {
+        notifyListeners();
+      }
+    }
   }
 
   void updateSearchQuery(String query) {
@@ -156,6 +212,12 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> createThread({String? title, String? folderId}) async {
+    if (!canCreateThread) {
+      _lastError = 'Лимит тарифа: максимум ${limits.maxChats} чатов.';
+      notifyListeners();
+      return;
+    }
+
     final now = DateTime.now();
     final newThread = ChatThread.create(
       title: title ?? 'Новый чат',
@@ -168,6 +230,9 @@ class ChatController extends ChangeNotifier {
       selectedFolderId: newThread.folderId,
     );
     await _commitWorkspace(nextWorkspace);
+    if (!limits.autoContextRefresh) {
+      _frozenContextByThread[newThread.id] = const <ChatMessage>[];
+    }
   }
 
   Future<void> renameThread({
@@ -216,6 +281,8 @@ class ChatController extends ChangeNotifier {
     if (remaining.isEmpty) {
       return;
     }
+
+    _frozenContextByThread.remove(threadId);
 
     final currentActive = _workspace.activeThreadId;
     final nextActive = currentActive == threadId
@@ -294,6 +361,12 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> createFolder(String name) async {
+    if (!canCreateFolder) {
+      _lastError = 'Лимит тарифа: максимум ${limits.maxFolders} папок.';
+      notifyListeners();
+      return;
+    }
+
     final trimmed = name.trim();
     if (trimmed.isEmpty) {
       return;
@@ -352,10 +425,21 @@ class ChatController extends ChangeNotifier {
       messages: const [],
       updatedAt: DateTime.now(),
     );
+    _frozenContextByThread.remove(clearedThread.id);
     final updatedThreads = _workspace.threads
         .map((thread) => thread.id == clearedThread.id ? clearedThread : thread)
         .toList(growable: false);
     await _commitWorkspace(_workspace.copyWith(threads: updatedThreads));
+  }
+
+  Future<void> refreshContextForActiveThread() async {
+    final trimmed = _trimContext(
+      activeThread.messages,
+      max: limits.maxContextMessages,
+    );
+    _frozenContextByThread[activeThread.id] = trimmed;
+    _lastError = null;
+    notifyListeners();
   }
 
   Future<String?> sendMessage(String inputText) async {
@@ -365,6 +449,11 @@ class ChatController extends ChangeNotifier {
     }
     if (_isLoading) {
       return 'Дождитесь завершения текущего ответа.';
+    }
+    if (_profile.isBanned) {
+      _lastError = 'Ваш профиль заблокирован администратором.';
+      notifyListeners();
+      return _lastError;
     }
 
     _lastError = null;
@@ -384,12 +473,32 @@ class ChatController extends ChangeNotifier {
     try {
       await _chatService.saveWorkspace(_workspace);
 
-      final assistantMessage = await _chatService.getAssistantReply(
+      final List<ChatMessage>? fixedContext = limits.autoContextRefresh
+          ? null
+          : (_frozenContextByThread[updatedThread.id] ??
+                _trimContext(
+                  updatedThread.messages,
+                  max: limits.maxContextMessages,
+                ));
+      if (fixedContext != null) {
+        _frozenContextByThread[updatedThread.id] = fixedContext;
+      }
+
+      final assistantResult = await _chatService.getAssistantReply(
         settings: _settings,
+        profile: _profile,
         conversation: updatedThread.messages,
+        fixedContext: fixedContext,
       );
+      _profile = assistantResult.profile;
+      if (_profile.isBanned) {
+        throw const ChatApiException(
+          'Ваш профиль заблокирован администратором.',
+        );
+      }
+
       final withAssistant = updatedThread.copyWith(
-        messages: [...updatedThread.messages, assistantMessage],
+        messages: [...updatedThread.messages, assistantResult.message],
         updatedAt: DateTime.now(),
       );
       _workspace = _replaceThread(withAssistant);
@@ -409,6 +518,19 @@ class ChatController extends ChangeNotifier {
       _isLoading = false;
       notifyListeners();
     }
+  }
+
+  List<ChatMessage> _trimContext(
+    List<ChatMessage> messages, {
+    required int max,
+  }) {
+    final nonSystem = messages
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: false);
+    if (nonSystem.length <= max) {
+      return nonSystem;
+    }
+    return nonSystem.sublist(nonSystem.length - max, nonSystem.length);
   }
 
   void stopGenerating() {

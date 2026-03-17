@@ -17,6 +17,10 @@ class ChatSettings {
     required this.languageCode,
     required this.themeMode,
     required this.palette,
+    required this.profileId,
+    required this.profileName,
+    required this.lanGatewayEnabled,
+    required this.lanGatewayUrl,
   });
 
   final String baseUrl;
@@ -28,6 +32,10 @@ class ChatSettings {
   final String languageCode;
   final AppThemeMode themeMode;
   final AppColorPalette palette;
+  final String profileId;
+  final String profileName;
+  final bool lanGatewayEnabled;
+  final String lanGatewayUrl;
 
   static const String defaultBaseUrl = 'http://172.19.0.1:1234';
   static const String defaultModel = 'qwen2.5-7b-instruct-uncensored';
@@ -39,6 +47,10 @@ class ChatSettings {
   static const String defaultLanguageCode = 'ru';
   static const AppThemeMode defaultThemeMode = AppThemeMode.system;
   static const AppColorPalette defaultPalette = AppColorPalette.ocean;
+  static const String defaultProfileId = '';
+  static const String defaultProfileName = 'Пользователь';
+  static const bool defaultLanGatewayEnabled = false;
+  static const String defaultLanGatewayUrl = 'http://172.19.0.1:8088';
 
   factory ChatSettings.defaults() {
     return const ChatSettings(
@@ -51,6 +63,10 @@ class ChatSettings {
       languageCode: defaultLanguageCode,
       themeMode: defaultThemeMode,
       palette: defaultPalette,
+      profileId: defaultProfileId,
+      profileName: defaultProfileName,
+      lanGatewayEnabled: defaultLanGatewayEnabled,
+      lanGatewayUrl: defaultLanGatewayUrl,
     );
   }
 
@@ -67,6 +83,10 @@ class ChatSettings {
       languageCode: _parseLanguageCode(json['languageCode']),
       themeMode: _parseThemeMode(json['themeMode'] as String?),
       palette: _parsePalette(json['palette'] as String?),
+      profileId: _parseProfileId(json['profileId']),
+      profileName: _parseProfileName(json['profileName']),
+      lanGatewayEnabled: _parseLanGatewayEnabled(json['lanGatewayEnabled']),
+      lanGatewayUrl: _parseLanGatewayUrl(json['lanGatewayUrl']),
     );
   }
 
@@ -80,6 +100,10 @@ class ChatSettings {
     String? languageCode,
     AppThemeMode? themeMode,
     AppColorPalette? palette,
+    String? profileId,
+    String? profileName,
+    bool? lanGatewayEnabled,
+    String? lanGatewayUrl,
   }) {
     return ChatSettings(
       baseUrl: baseUrl ?? this.baseUrl,
@@ -91,11 +115,23 @@ class ChatSettings {
       languageCode: languageCode ?? this.languageCode,
       themeMode: themeMode ?? this.themeMode,
       palette: palette ?? this.palette,
+      profileId: profileId ?? this.profileId,
+      profileName: profileName ?? this.profileName,
+      lanGatewayEnabled: lanGatewayEnabled ?? this.lanGatewayEnabled,
+      lanGatewayUrl: lanGatewayUrl ?? this.lanGatewayUrl,
     );
   }
 
   String get normalizedBaseUrl {
     final trimmed = baseUrl.trim();
+    if (trimmed.endsWith('/')) {
+      return trimmed.substring(0, trimmed.length - 1);
+    }
+    return trimmed;
+  }
+
+  String get normalizedLanGatewayUrl {
+    final trimmed = lanGatewayUrl.trim();
     if (trimmed.endsWith('/')) {
       return trimmed.substring(0, trimmed.length - 1);
     }
@@ -124,6 +160,10 @@ class ChatSettings {
       'languageCode': languageCode,
       'themeMode': _themeModeToJson(themeMode),
       'palette': _paletteToJson(palette),
+      'profileId': profileId,
+      'profileName': profileName,
+      'lanGatewayEnabled': lanGatewayEnabled,
+      'lanGatewayUrl': lanGatewayUrl,
     };
   }
 
@@ -208,5 +248,33 @@ class ChatSettings {
       case AppColorPalette.forest:
         return 'forest';
     }
+  }
+
+  static String _parseProfileId(Object? value) {
+    if (value is String) {
+      return value.trim();
+    }
+    return defaultProfileId;
+  }
+
+  static String _parseProfileName(Object? value) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+    return defaultProfileName;
+  }
+
+  static bool _parseLanGatewayEnabled(Object? value) {
+    if (value is bool) {
+      return value;
+    }
+    return defaultLanGatewayEnabled;
+  }
+
+  static String _parseLanGatewayUrl(Object? value) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+    return defaultLanGatewayUrl;
   }
 }

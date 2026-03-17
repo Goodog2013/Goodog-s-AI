@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../application/web_intent_parser.dart';
 import '../../models/chat_folder.dart';
 import '../../models/chat_thread.dart';
+import '../../models/user_plan.dart';
 import '../localization/app_i18n.dart';
 import '../controllers/chat_controller.dart';
 import '../theme/app_theme.dart';
@@ -224,9 +225,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _createThread() async {
+    final previousError = widget.controller.lastError;
     await widget.controller.createThread();
     if (!mounted) {
       return;
+    }
+    final nextError = widget.controller.lastError;
+    if (nextError != null && nextError != previousError) {
+      _showSnack(nextError);
     }
     _inputFocusNode.requestFocus();
   }
@@ -266,7 +272,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (name == null) {
       return;
     }
+    final previousError = widget.controller.lastError;
     await widget.controller.createFolder(name);
+    if (!mounted) {
+      return;
+    }
+    final nextError = widget.controller.lastError;
+    if (nextError != null && nextError != previousError) {
+      _showSnack(nextError);
+    }
   }
 
   Future<void> _renameFolder(ChatFolder folder) async {
@@ -642,6 +656,72 @@ class _ChatScreenState extends State<ChatScreen> {
                         ],
                       ),
                       const SizedBox(height: 8),
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: colors.primary.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: colors.primary.withValues(alpha: 0.25),
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 13,
+                                backgroundColor: colors.primary.withValues(
+                                  alpha: 0.2,
+                                ),
+                                child: Icon(
+                                  Icons.person_rounded,
+                                  size: 16,
+                                  color: colors.primary,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      controller.profile.displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${controller.profile.plan.title} • ID: ${controller.profile.id}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Синхронизировать права',
+                                onPressed: () {
+                                  unawaited(controller.syncProfile());
+                                },
+                                icon: const Icon(Icons.sync_rounded),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       TextField(
                         controller: _searchController,
                         onChanged: _updateSearch,
@@ -663,7 +743,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         children: [
                           Expanded(
                             child: FilledButton.tonalIcon(
-                              onPressed: _createThread,
+                              onPressed: controller.canCreateThread
+                                  ? _createThread
+                                  : null,
                               icon: const Icon(Icons.add_comment_rounded),
                               label: const Text('Новый чат'),
                             ),
@@ -671,7 +753,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: OutlinedButton.icon(
-                              onPressed: _createFolder,
+                              onPressed: controller.canCreateFolder
+                                  ? _createFolder
+                                  : null,
                               icon: const Icon(Icons.create_new_folder_rounded),
                               label: const Text('Папка'),
                             ),
@@ -1316,6 +1400,15 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed: () => _renameThread(thread),
                   icon: const Icon(Icons.drive_file_rename_outline_rounded),
                 ),
+                if (!controller.autoContextRefreshEnabled)
+                  IconButton(
+                    tooltip: 'Обновить контекст',
+                    onPressed: () {
+                      unawaited(controller.refreshContextForActiveThread());
+                      _showSnack('Контекст этого чата обновлен вручную.');
+                    },
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
                 if (isWide)
                   IconButton(
                     tooltip: 'Новый чат',
@@ -1336,8 +1429,14 @@ class _ChatScreenState extends State<ChatScreen> {
         ? 'Все чаты'
         : _folderNameById(controller, selectedFolderId) ?? 'Папка';
 
+    final contextInfo =
+        '${controller.activeContextMessagesCount}/${controller.limits.maxContextMessages}';
+    final contextMode = controller.autoContextRefreshEnabled
+        ? 'авто-контекст'
+        : 'ручной контекст';
+    final tier = controller.profile.plan.title;
     final mark = controller.activeThread.isFavorite ? ' • избранный' : '';
-    return '$folderName$mark';
+    return '$folderName • $tier • $contextMode $contextInfo$mark';
   }
 
   String? _folderNameById(ChatController controller, String folderId) {
@@ -1375,6 +1474,36 @@ class _ChatScreenState extends State<ChatScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (!controller.autoContextRefreshEnabled)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                    decoration: BoxDecoration(
+                      color: colors.secondaryContainer.withValues(alpha: 0.88),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: colors.secondary.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.history_toggle_off_rounded,
+                          color: colors.onSecondaryContainer,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Автообновление контекста недоступно на текущем тарифе. Используйте кнопку обновления в заголовке чата.',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: colors.onSecondaryContainer),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (!controller.autoContextRefreshEnabled)
+                  const SizedBox(height: 10),
                 if (_composerNeedsWeb && !controller.settings.webSearchEnabled)
                   Container(
                     width: double.infinity,
@@ -1418,6 +1547,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: TextField(
                           controller: _inputController,
                           focusNode: _inputFocusNode,
+                          enabled: !controller.isCurrentUserBanned,
                           minLines: 1,
                           maxLines: 6,
                           keyboardType: TextInputType.multiline,
@@ -1433,9 +1563,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       height: 50,
                       width: 50,
                       child: FilledButton(
-                        onPressed: controller.isLoading
-                            ? controller.stopGenerating
-                            : _sendMessage,
+                        onPressed: controller.isCurrentUserBanned
+                            ? null
+                            : (controller.isLoading
+                                  ? controller.stopGenerating
+                                  : _sendMessage),
                         style: FilledButton.styleFrom(
                           backgroundColor: controller.isLoading
                               ? colors.error
