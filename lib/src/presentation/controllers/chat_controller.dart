@@ -61,7 +61,7 @@ class ChatController extends ChangeNotifier {
           .toList(growable: false);
       return conversationNonSystem.length.clamp(0, maxContextMessages);
     }
-    return _manualTurnsUsed(activeThread).clamp(0, maxContextMessages);
+    return activeThread.manualTurnsUsed.clamp(0, maxContextMessages);
   }
 
   bool get canCreateFolder => _workspace.folders.length < limits.maxFolders;
@@ -565,6 +565,7 @@ class ChatController extends ChangeNotifier {
     final clearedThread = activeThread.copyWith(
       messages: const [],
       manualContextStartCount: 0,
+      manualTurnsUsed: 0,
       updatedAt: DateTime.now(),
     );
     final updatedThreads = _workspace.threads
@@ -577,6 +578,7 @@ class ChatController extends ChangeNotifier {
     final nonSystemCount = _nonSystemMessages(activeThread.messages).length;
     final refreshedThread = activeThread.copyWith(
       manualContextStartCount: nonSystemCount,
+      manualTurnsUsed: 0,
       updatedAt: DateTime.now(),
     );
     _workspace = _replaceThread(refreshedThread);
@@ -604,7 +606,7 @@ class ChatController extends ChangeNotifier {
       return _lastError;
     }
     if (!limits.autoContextRefresh) {
-      final usedTurns = _manualTurnsUsed(activeThread);
+      final usedTurns = activeThread.manualTurnsUsed;
       final maxTurns = limits.maxContextMessages;
       if (usedTurns >= maxTurns) {
         _lastError =
@@ -616,13 +618,18 @@ class ChatController extends ChangeNotifier {
 
     _lastError = null;
     final now = DateTime.now();
+    final isManualContext = !limits.autoContextRefresh;
     final userMessage = ChatMessage.user(text);
     final title = _deriveTitle(activeThread.title, text);
     final manualContextStartCount = activeThread.manualContextStartCount;
+    final manualTurnsUsed = isManualContext
+        ? activeThread.manualTurnsUsed + 1
+        : activeThread.manualTurnsUsed;
     final updatedThread = activeThread.copyWith(
       title: title,
       messages: [...activeThread.messages, userMessage],
       manualContextStartCount: manualContextStartCount,
+      manualTurnsUsed: manualTurnsUsed,
       updatedAt: now,
     );
 
@@ -657,6 +664,7 @@ class ChatController extends ChangeNotifier {
       final withAssistant = updatedThread.copyWith(
         messages: [...updatedThread.messages, assistantResult.message],
         manualContextStartCount: updatedThread.manualContextStartCount,
+        manualTurnsUsed: updatedThread.manualTurnsUsed,
         updatedAt: DateTime.now(),
       );
       _workspace = _replaceThread(withAssistant);
@@ -678,10 +686,6 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  int _manualTurnsUsed(ChatThread thread) {
-    return _countUserMessages(_manualContextMessages(thread));
-  }
-
   List<ChatMessage> _manualContextMessages(ChatThread thread) {
     final nonSystem = _nonSystemMessages(thread.messages);
     final start = thread.manualContextStartCount.clamp(0, nonSystem.length);
@@ -692,16 +696,6 @@ class ChatController extends ChangeNotifier {
     return messages
         .where((message) => message.role != ChatRole.system)
         .toList(growable: false);
-  }
-
-  int _countUserMessages(List<ChatMessage> messages) {
-    var count = 0;
-    for (final message in messages) {
-      if (message.role == ChatRole.user) {
-        count++;
-      }
-    }
-    return count;
   }
 
   void stopGenerating() {

@@ -7,6 +7,7 @@ class ChatThread {
     required this.folderId,
     required this.messages,
     required this.manualContextStartCount,
+    required this.manualTurnsUsed,
     required this.createdAt,
     required this.updatedAt,
     required this.isFavorite,
@@ -17,6 +18,7 @@ class ChatThread {
   final String? folderId;
   final List<ChatMessage> messages;
   final int manualContextStartCount;
+  final int manualTurnsUsed;
   final DateTime createdAt;
   final DateTime updatedAt;
   final bool isFavorite;
@@ -29,6 +31,7 @@ class ChatThread {
       folderId: folderId,
       messages: const [],
       manualContextStartCount: 0,
+      manualTurnsUsed: 0,
       createdAt: now,
       updatedAt: now,
       isFavorite: false,
@@ -51,6 +54,13 @@ class ChatThread {
     final manualContextStartCount = rawManualStart is int
         ? rawManualStart
         : parsedNonSystemCount;
+    final rawManualTurns = json['manualTurnsUsed'];
+    final manualTurnsUsed = rawManualTurns is int
+        ? rawManualTurns
+        : _countUserMessagesSince(
+            parsedMessages,
+            start: manualContextStartCount,
+          );
 
     return ChatThread(
       id: json['id'] as String? ?? _generateId(),
@@ -61,6 +71,7 @@ class ChatThread {
         0,
         parsedNonSystemCount,
       ),
+      manualTurnsUsed: manualTurnsUsed < 0 ? 0 : manualTurnsUsed,
       createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? now,
       updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? now,
       isFavorite: json['isFavorite'] as bool? ?? false,
@@ -74,6 +85,7 @@ class ChatThread {
     bool clearFolder = false,
     List<ChatMessage>? messages,
     int? manualContextStartCount,
+    int? manualTurnsUsed,
     DateTime? createdAt,
     DateTime? updatedAt,
     bool? isFavorite,
@@ -85,6 +97,7 @@ class ChatThread {
       messages: messages ?? this.messages,
       manualContextStartCount:
           manualContextStartCount ?? this.manualContextStartCount,
+      manualTurnsUsed: manualTurnsUsed ?? this.manualTurnsUsed,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       isFavorite: isFavorite ?? this.isFavorite,
@@ -111,10 +124,28 @@ class ChatThread {
       'folderId': folderId,
       'messages': messages.map((message) => message.toJson()).toList(),
       'manualContextStartCount': manualContextStartCount,
+      'manualTurnsUsed': manualTurnsUsed,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
       'isFavorite': isFavorite,
     };
+  }
+
+  static int _countUserMessagesSince(
+    List<ChatMessage> messages, {
+    required int start,
+  }) {
+    final nonSystem = messages
+        .where((message) => message.role != ChatRole.system)
+        .toList(growable: false);
+    final safeStart = start.clamp(0, nonSystem.length);
+    var count = 0;
+    for (var i = safeStart; i < nonSystem.length; i++) {
+      if (nonSystem[i].role == ChatRole.user) {
+        count++;
+      }
+    }
+    return count;
   }
 
   static String _generateId() {
