@@ -84,7 +84,7 @@ function Resolve-InstallerConfig {
 
   if ($Type -eq "admin") {
     return @{
-      SourceDir = Join-Path $ProjectDir "artifacts\windows_admin_release"
+      SourceDir = Join-Path $ProjectDir "Releases\admin"
       IssPath = Join-Path $ProjectDir "installer\goodogs_ai_admin_installer.iss"
       ExpectedExeName = "Goodog's AI Admin.exe"
       DefaultOutputBaseFilenamePrefix = "Goodog's AI Admin Setup v"
@@ -92,7 +92,7 @@ function Resolve-InstallerConfig {
   }
 
   return @{
-    SourceDir = Join-Path $ProjectDir "artifacts\windows_release"
+    SourceDir = Join-Path $ProjectDir "Releases\user"
     IssPath = Join-Path $ProjectDir "installer\goodogs_ai_installer.iss"
     ExpectedExeName = "Goodog's AI.exe"
     DefaultOutputBaseFilenamePrefix = "Goodog's AI Setup v"
@@ -114,7 +114,7 @@ if (-not (Test-Path $sourceDirPath)) {
 $outputDirPath = if ($OutputDir) {
   $OutputDir
 } else {
-  Join-Path $projectDir "artifacts\installer"
+  Join-Path $projectDir "Releases\installer"
 }
 New-Item -ItemType Directory -Force -Path $outputDirPath | Out-Null
 $outputDirPath = (Resolve-Path $outputDirPath).Path

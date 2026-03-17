@@ -18,6 +18,8 @@ Goodog's AI - это локальный чат-клиент, который ра
 - LAN-очередь запросов с приоритетами
 - отдельное admin-приложение для бана и смены прав
 
+### Рекомендации
+Используйте LM Studio и желательно модель (qwen2.5-7b-instruct-uncensored) т.к проект сделан под них.
 ### Архитектура
 Проект разделен на слои:
 - `lib/src/presentation` - экраны, контроллеры, виджеты, тема
@@ -128,6 +130,8 @@ It includes:
 - LAN request queue with priorities
 - separate admin app for bans and plan management
 
+### Recommendations
+Use LM Studio and preferably the (qwen2.5-7b-instruct-uncensored) model, since the project is built for them.
 ### Architecture
 Layered structure:
 - `lib/src/presentation` - screens, controllers, widgets, theme

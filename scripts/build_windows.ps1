@@ -67,6 +67,7 @@ function Invoke-RobocopyMirror {
     ".git",
     "build",
     "artifacts",
+    "Releases",
     "windows\\flutter\\ephemeral",
     "ios",
     "macos",
@@ -156,11 +157,13 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $workspaceDir = Join-Path $BuildRoot "workspace_$timestamp"
 $releaseDir = Join-Path $workspaceDir "build\\windows\\x64\\runner\\Release"
 
-$chatArtifactBaseDir = Join-Path $projectDir "artifacts\\windows_release"
-$adminArtifactBaseDir = Join-Path $projectDir "artifacts\\windows_admin_release"
-$installerDir = Join-Path $projectDir "artifacts\\installer"
+$releasesRootDir = Join-Path $projectDir "Releases"
+$chatArtifactBaseDir = Join-Path $releasesRootDir "user"
+$adminArtifactBaseDir = Join-Path $releasesRootDir "admin"
+$installerDir = Join-Path $releasesRootDir "installer"
 
 New-Item -ItemType Directory -Force -Path $workspaceDir | Out-Null
+New-Item -ItemType Directory -Force -Path $releasesRootDir | Out-Null
 New-Item -ItemType Directory -Force -Path $chatArtifactBaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $adminArtifactBaseDir | Out-Null
 New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
@@ -189,7 +192,7 @@ if (-not (Test-Path $releaseDir)) {
   throw "Release directory was not produced: $releaseDir"
 }
 
-$chatArtifactDir = Copy-ReleaseArtifacts -ReleaseDir $releaseDir -PreferredArtifactDir $chatArtifactBaseDir -FallbackNamePrefix "windows_release"
+$chatArtifactDir = Copy-ReleaseArtifacts -ReleaseDir $releaseDir -PreferredArtifactDir $chatArtifactBaseDir -FallbackNamePrefix "user_release"
 $chatExePath = Resolve-PrimaryExe -ArtifactDir $chatArtifactDir -ExpectedName "Goodog's AI.exe" -FallbackName "goodogs_chat.exe"
 
 Write-Host ""
@@ -199,7 +202,7 @@ if (-not (Test-Path $releaseDir)) {
   throw "Admin release directory was not produced: $releaseDir"
 }
 
-$adminArtifactDir = Copy-ReleaseArtifacts -ReleaseDir $releaseDir -PreferredArtifactDir $adminArtifactBaseDir -FallbackNamePrefix "windows_admin_release"
+$adminArtifactDir = Copy-ReleaseArtifacts -ReleaseDir $releaseDir -PreferredArtifactDir $adminArtifactBaseDir -FallbackNamePrefix "admin_release"
 $adminExePath = Resolve-PrimaryExe -ArtifactDir $adminArtifactDir -ExpectedName "Goodog's AI Admin.exe" -FallbackName "goodogs_chat.exe"
 $renamedAdminExe = Join-Path (Split-Path $adminExePath -Parent) "Goodog's AI Admin.exe"
 if ($adminExePath -ne $renamedAdminExe) {
@@ -253,6 +256,7 @@ if (-not $SkipInstaller) {
 
 Write-Host ""
 Write-Host "Build completed successfully."
+Write-Host "Releases root:   $releasesRootDir"
 Write-Host "User artifacts:  $chatArtifactDir"
 Write-Host "User exe:        $chatExePath"
 if ($userInstallerPath) {
