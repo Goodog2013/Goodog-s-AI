@@ -1408,6 +1408,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     ],
                   ),
                 ),
+                _buildContextUsageCircle(context, controller),
+                const SizedBox(width: 4),
                 IconButton(
                   tooltip: thread.isFavorite
                       ? 'Убрать из избранного'
@@ -1463,6 +1465,41 @@ class _ChatScreenState extends State<ChatScreen> {
     final tier = controller.profile.plan.title;
     final mark = controller.activeThread.isFavorite ? ' • избранный' : '';
     return '$folderName • $tier • $contextMode $contextInfo$mark';
+  }
+
+  Widget _buildContextUsageCircle(
+    BuildContext context,
+    ChatController controller,
+  ) {
+    final colors = Theme.of(context).colorScheme;
+    final current = controller.activeContextMessagesCount;
+    final max = controller.limits.maxContextMessages;
+    final ratio = max <= 0 ? 0.0 : (current / max).clamp(0.0, 1.0);
+    final label = current > 99 ? '99+' : current.toString();
+
+    return Tooltip(
+      message: 'Контекст: $current/$max',
+      child: SizedBox(
+        width: 34,
+        height: 34,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CircularProgressIndicator(
+              value: ratio,
+              strokeWidth: 3,
+              backgroundColor: colors.outlineVariant.withValues(alpha: 0.35),
+            ),
+            Text(
+              label,
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w800),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   String? _folderNameById(ChatController controller, String folderId) {
