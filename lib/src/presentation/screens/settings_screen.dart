@@ -225,6 +225,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
+  static const Set<String> _loopbackHosts = <String>{
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    '::1',
+  };
+
+  static const Set<String> _bridgeHosts = <String>{
+    '172.17.0.1',
+    '172.18.0.1',
+    '172.19.0.1',
+    '172.20.0.1',
+    '172.21.0.1',
+  };
+
+  String _pickText({required String ru, required String en}) {
+    return _languageCode == 'en' ? en : ru;
+  }
+
+  String? _androidNetworkWarningForUrl(String rawUrl) {
+    if (!_isAndroid) {
+      return null;
+    }
+
+    final normalized = _normalizeBaseUrl(rawUrl);
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || !uri.hasAuthority) {
+      return null;
+    }
+    final host = uri.host.toLowerCase();
+
+    if (_loopbackHosts.contains(host)) {
+      return _pickText(
+        ru: 'Р”Р»СЏ С‚РµР»РµС„РѕРЅР° localhost/127.0.0.1 СѓРєР°Р·С‹РІР°РµС‚ РЅР° СЃР°Рј С‚РµР»РµС„РѕРЅ. РЈРєР°Р¶РёС‚Рµ LAN IP РІР°С€РµРіРѕ РџРљ (РѕР±С‹С‡РЅРѕ 192.168.x.x).',
+        en: 'On a real phone localhost/127.0.0.1 points to the phone itself. Use your PC LAN IP (usually 192.168.x.x).',
+      );
+    }
+
+    if (host == '10.0.2.2') {
+      return _pickText(
+        ru: '10.0.2.2 СЂР°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ РІ Android-СЌРјСѓР»СЏС‚РѕСЂРµ. Р”Р»СЏ СЂРµР°Р»СЊРЅРѕРіРѕ С‚РµР»РµС„РѕРЅР° РЅСѓР¶РµРЅ LAN IP РІР°С€РµРіРѕ РџРљ.',
+        en: '10.0.2.2 works only in the Android emulator. A real phone needs your PC LAN IP.',
+      );
+    }
+
+    if (_bridgeHosts.contains(host)) {
+      return _pickText(
+        ru: 'РђРґСЂРµСЃ $host С‡Р°СЃС‚Рѕ СЏРІР»СЏРµС‚СЃСЏ РІРЅСѓС‚СЂРµРЅРЅРёРј Docker/WSL-Р°РґР°РїС‚РµСЂРѕРј Рё РЅРµРґРѕСЃС‚СѓРїРµРЅ РёР· Wi-Fi. РСЃРїРѕР»СЊР·СѓР№С‚Рµ IP РџРљ РёР· ipconfig.',
+        en: 'Address $host is often a Docker/WSL bridge and may be unreachable from Wi-Fi. Use your PC LAN IP from ipconfig.',
+      );
+    }
+
+    return null;
+  }
+
   String _normalizeBaseUrl(String rawUrl) {
     final text = rawUrl.trim();
     if (text.endsWith('/')) {
@@ -279,7 +334,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } on TimeoutException {
       _showSnack(_i18n.t('connectionTimeout', {'target': 'LM Studio'}));
     } on SocketException {
-      _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LM Studio'}));
+      final hint = _androidNetworkWarningForUrl(_baseUrlController.text);
+      if (hint == null) {
+        _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LM Studio'}));
+      } else {
+        _showSnack(
+          '${_i18n.t('connectionNoNetwork', {'target': 'LM Studio'})} $hint',
+        );
+      }
     } catch (_) {
       _showSnack(_i18n.t('connectionFailed', {'target': 'LM Studio'}));
     } finally {
@@ -320,7 +382,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } on TimeoutException {
       _showSnack(_i18n.t('connectionTimeout', {'target': 'LAN gateway'}));
     } on SocketException {
-      _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LAN gateway'}));
+      final hint = _androidNetworkWarningForUrl(_lanGatewayUrlController.text);
+      if (hint == null) {
+        _showSnack(_i18n.t('connectionNoNetwork', {'target': 'LAN gateway'}));
+      } else {
+        _showSnack(
+          '${_i18n.t('connectionNoNetwork', {'target': 'LAN gateway'})} $hint',
+        );
+      }
     } catch (_) {
       _showSnack(_i18n.t('connectionFailed', {'target': 'LAN gateway'}));
     } finally {
@@ -351,6 +420,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildAndroidNetworkHints(AppI18n i18n) {
     final colors = Theme.of(context).colorScheme;
+    final warning = _androidNetworkWarningForUrl(_baseUrlController.text);
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 12),
@@ -406,6 +476,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ],
           ),
+          if (warning != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: colors.errorContainer.withValues(alpha: 0.92),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: colors.error.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.warning_amber_rounded,
+                    color: colors.onErrorContainer,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      warning,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colors.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -628,6 +729,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             labelText: i18n.t('baseUrlLabel'),
                             hintText: 'http://172.19.0.1:1234',
                           ),
+                          onChanged: (_) => setState(() {}),
                           validator: _validateBaseUrl,
                         ),
                         const SizedBox(height: 12),
@@ -668,15 +770,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 12),
                   _buildSection(
                     order: 2,
-                    title: 'Профиль и доступ',
+                    title: 'РџСЂРѕС„РёР»СЊ Рё РґРѕСЃС‚СѓРї',
                     subtitle:
-                        'Профиль используется для прав (Free/Plus/Max), бана и очереди запросов по локальной сети.',
+                        'РџСЂРѕС„РёР»СЊ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ РїСЂР°РІ (Free/Plus/Max), Р±Р°РЅР° Рё РѕС‡РµСЂРµРґРё Р·Р°РїСЂРѕСЃРѕРІ РїРѕ Р»РѕРєР°Р»СЊРЅРѕР№ СЃРµС‚Рё.',
                     child: Column(
                       children: [
                         TextFormField(
                           controller: _profileNameController,
                           decoration: const InputDecoration(
-                            labelText: 'Имя профиля',
+                            labelText: 'РРјСЏ РїСЂРѕС„РёР»СЏ',
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -684,17 +786,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           controller: _profileIdController,
                           readOnly: true,
                           decoration: const InputDecoration(
-                            labelText: 'ID профиля',
+                            labelText: 'ID РїСЂРѕС„РёР»СЏ',
                             helperText:
-                                'Генерируется автоматически. По нему админ меняет права.',
+                                'Р“РµРЅРµСЂРёСЂСѓРµС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё. РџРѕ РЅРµРјСѓ Р°РґРјРёРЅ РјРµРЅСЏРµС‚ РїСЂР°РІР°.',
                           ),
                         ),
                         const SizedBox(height: 10),
                         SwitchListTile.adaptive(
                           contentPadding: EdgeInsets.zero,
-                          title: const Text('LAN-шлюз (очередь + права)'),
+                          title: const Text(
+                            'LAN-С€Р»СЋР· (РѕС‡РµСЂРµРґСЊ + РїСЂР°РІР°)',
+                          ),
                           subtitle: const Text(
-                            'Включите, чтобы запросы шли через локальный сервер-очередь с приоритетами.',
+                            'Р’РєР»СЋС‡РёС‚Рµ, С‡С‚РѕР±С‹ Р·Р°РїСЂРѕСЃС‹ С€Р»Рё С‡РµСЂРµР· Р»РѕРєР°Р»СЊРЅС‹Р№ СЃРµСЂРІРµСЂ-РѕС‡РµСЂРµРґСЊ СЃ РїСЂРёРѕСЂРёС‚РµС‚Р°РјРё.',
                           ),
                           value: _lanGatewayEnabled,
                           onChanged: (value) {
@@ -708,9 +812,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           TextFormField(
                             controller: _lanGatewayUrlController,
                             decoration: const InputDecoration(
-                              labelText: 'URL LAN-шлюза',
+                              labelText: 'URL LAN-С€Р»СЋР·Р°',
                               hintText: 'http://192.168.1.10:8088',
                             ),
+                            onChanged: (_) => setState(() {}),
                             validator: _validateLanGatewayUrl,
                           ),
                           const SizedBox(height: 10),

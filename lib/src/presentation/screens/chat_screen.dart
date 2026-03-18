@@ -506,6 +506,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Scaffold(
       key: _scaffoldKey,
+      resizeToAvoidBottomInset: true,
       backgroundColor: Colors.transparent,
       drawer: isWide
           ? null
@@ -524,10 +525,27 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: isWide || DesktopWindowBar.isSupported
           ? null
           : AppBar(
-              title: Text(
-                controller.activeThread.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              titleSpacing: 0,
+              title: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(7),
+                    child: Image.asset(
+                      'assets/app_icon.png',
+                      width: 22,
+                      height: 22,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      controller.activeThread.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
               leading: IconButton(
                 tooltip: 'Чаты',
@@ -550,7 +568,7 @@ class _ChatScreenState extends State<ChatScreen> {
       body: AnimatedChatBackground(
         child: SafeArea(
           top: !DesktopWindowBar.isSupported,
-          bottom: false,
+          bottom: true,
           child: Column(
             children: [
               if (DesktopWindowBar.isSupported)

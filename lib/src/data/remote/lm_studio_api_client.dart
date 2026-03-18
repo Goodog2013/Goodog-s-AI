@@ -16,6 +16,21 @@ class LmStudioApiClient {
 
   static const String cancelledByUserMessage = 'Генерация остановлена.';
 
+  static const Set<String> _loopbackHosts = <String>{
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    '::1',
+  };
+
+  static const Set<String> _bridgeHosts = <String>{
+    '172.17.0.1',
+    '172.18.0.1',
+    '172.19.0.1',
+    '172.20.0.1',
+    '172.21.0.1',
+  };
+
   Future<String> createChatCompletion({
     required ChatSettings settings,
     required List<ChatMessage> messages,
@@ -58,13 +73,11 @@ class LmStudioApiClient {
       return reply.trim();
     } on ChatApiException {
       rethrow;
-    } on SocketException {
+    } on SocketException catch (_) {
       if (_cancelRequested) {
         throw const ChatApiException(cancelledByUserMessage, isCancelled: true);
       }
-      throw const ChatApiException(
-        'Не удалось подключиться к LM Studio. Проверьте URL и сеть.',
-      );
+      throw ChatApiException(_buildConnectivityMessage(uri));
     } on http.ClientException {
       if (_cancelRequested) {
         throw const ChatApiException(cancelledByUserMessage, isCancelled: true);
@@ -105,6 +118,30 @@ class LmStudioApiClient {
     }
 
     return 'LM Studio вернул HTTP $statusCode.';
+  }
+
+  String _buildConnectivityMessage(Uri uri) {
+    final host = uri.host.toLowerCase();
+    final base =
+        'Не удалось подключиться к LM Studio (${uri.host}:${uri.port}). Проверьте URL и сеть.';
+
+    if (_loopbackHosts.contains(host)) {
+      return '$base На Android-телефоне localhost/127.0.0.1 указывает на сам телефон, а не на ПК.';
+    }
+
+    if (Platform.isAndroid && host == '10.0.2.2') {
+      return '$base Адрес 10.0.2.2 работает только в Android-эмуляторе.';
+    }
+
+    if (Platform.isAndroid && _bridgeHosts.contains(host)) {
+      return '$base Адрес $host часто является внутренним Docker/WSL IP и недоступен из Wi-Fi. Укажите LAN IP ПК (ipconfig).';
+    }
+
+    if (Platform.isAndroid) {
+      return '$base Для телефона используйте LAN IP ПК (обычно 192.168.x.x).';
+    }
+
+    return base;
   }
 
   String? _extractAssistantReply(Map<String, dynamic> json) {

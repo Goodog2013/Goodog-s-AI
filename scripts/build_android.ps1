@@ -1,5 +1,6 @@
 param(
   [string]$FlutterExe = "",
+  [string]$AndroidSdkPath = "",
   [string]$BuildRoot = "C:\\goodogs_ai_android_build",
   [switch]$SkipClean,
   [switch]$BuildAab,
@@ -40,16 +41,76 @@ function Resolve-FlutterExe {
   throw "Flutter executable was not found. Add flutter to PATH or pass -FlutterExe."
 }
 
+function Test-AndroidSdkLayout {
+  param(
+    [string]$SdkRoot
+  )
+
+  $missing = @()
+
+  $platformToolsDir = Join-Path $SdkRoot "platform-tools"
+  if (-not (Test-Path $platformToolsDir)) {
+    $missing += "platform-tools"
+  }
+
+  $buildToolsDir = Join-Path $SdkRoot "build-tools"
+  $hasBuildTools = Get-ChildItem -Path $buildToolsDir -Directory -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if (-not $hasBuildTools) {
+    $missing += "build-tools"
+  }
+
+  $platformsDir = Join-Path $SdkRoot "platforms"
+  $hasPlatforms = Get-ChildItem -Path $platformsDir -Directory -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if (-not $hasPlatforms) {
+    $missing += "platforms"
+  }
+
+  return @{
+    IsValid = ($missing.Count -eq 0)
+    Missing = $missing
+  }
+}
+
 function Resolve-AndroidSdkPath {
-  param([string]$ProjectDir)
+  param(
+    [string]$ProjectDir,
+    [string]$FlutterExe,
+    [string]$UserSdkPath
+  )
 
   $candidates = @()
+
+  if ($UserSdkPath) {
+    $candidates += $UserSdkPath
+  }
 
   if ($env:ANDROID_HOME) {
     $candidates += $env:ANDROID_HOME
   }
   if ($env:ANDROID_SDK_ROOT) {
     $candidates += $env:ANDROID_SDK_ROOT
+  }
+  if ($env:ANDROID_SDK_HOME) {
+    $candidates += $env:ANDROID_SDK_HOME
+  }
+
+  if ($FlutterExe) {
+    try {
+      $configOutput = & $FlutterExe config --list 2>$null
+      foreach ($line in $configOutput) {
+        if ($line -match 'android-sdk:\s*(.+)$') {
+          $flutterSdk = $Matches[1].Trim()
+          if ($flutterSdk) {
+            $candidates += $flutterSdk
+          }
+        }
+      }
+    }
+    catch {
+      # Ignore parsing errors and continue probing defaults.
+    }
   }
 
   $localPropertiesPath = Join-Path $ProjectDir "android\\local.properties"
@@ -68,24 +129,130 @@ function Resolve-AndroidSdkPath {
 
   $defaultLocal = Join-Path $env:LOCALAPPDATA "Android\\Sdk"
   $defaultProgramData = "C:\\Android\\Sdk"
+  $defaultUserProfile = Join-Path $env:USERPROFILE "AppData\\Local\\Android\\Sdk"
+  $nearbyPlatformTools = Join-Path (Split-Path $ProjectDir -Parent) "platform-tools"
   $candidates += $defaultLocal
   $candidates += $defaultProgramData
+  $candidates += $defaultUserProfile
+  $candidates += $nearbyPlatformTools
+
+  $adb = Get-Command adb -ErrorAction SilentlyContinue
+  if ($adb) {
+    $adbDir = Split-Path $adb.Source -Parent
+    if ($adbDir) {
+      $sdkFromAdb = Split-Path $adbDir -Parent
+      if ($sdkFromAdb) {
+        $candidates += $sdkFromAdb
+      }
+    }
+  }
 
   $uniqueCandidates = $candidates |
     Where-Object { $_ -and $_.Trim().Length -gt 0 } |
+    ForEach-Object { $_.Trim() -replace '\\\\', '\' } |
     Select-Object -Unique
+
+  $checkedRoots = @()
+  $invalidRoots = @()
 
   foreach ($candidate in $uniqueCandidates) {
     if (-not (Test-Path $candidate)) {
       continue
     }
-    $platformTools = Join-Path $candidate "platform-tools"
-    if (Test-Path $platformTools) {
-      return (Resolve-Path $candidate).Path
+
+    $resolvedCandidate = (Resolve-Path $candidate).Path
+    if ((Split-Path $resolvedCandidate -Leaf) -ieq "platform-tools") {
+      $rootsToCheck = @((Split-Path $resolvedCandidate -Parent))
+    }
+    else {
+      $rootsToCheck = @($resolvedCandidate)
+    }
+    $rootsToCheck = $rootsToCheck |
+      Where-Object { $_ -and $_.Trim().Length -gt 0 } |
+      Select-Object -Unique
+
+    foreach ($root in $rootsToCheck) {
+      if (-not (Test-Path $root)) {
+        continue
+      }
+      if ($checkedRoots -contains $root) {
+        continue
+      }
+
+      $checkedRoots += $root
+      $layout = Test-AndroidSdkLayout -SdkRoot $root
+      if ($layout.IsValid) {
+        return @{
+          Path = $root
+          Checked = $uniqueCandidates
+          CheckedRoots = $checkedRoots
+          InvalidRoots = $invalidRoots
+        }
+      }
+
+      $missingText = ($layout.Missing | ForEach-Object { $_ }) -join ", "
+      $invalidRoots += "$root (missing: $missingText)"
     }
   }
 
-  return ""
+  return @{
+    Path = ""
+    Checked = $uniqueCandidates
+    CheckedRoots = $checkedRoots
+    InvalidRoots = $invalidRoots
+  }
+}
+
+function Format-SdkHints {
+  param(
+    [string]$UserSdkPath
+  )
+
+  $hints = @()
+  if ($UserSdkPath) {
+    $hints += "Provided -AndroidSdkPath: $UserSdkPath"
+  }
+  else {
+    $hints += "Tip: pass -AndroidSdkPath explicitly if your SDK is in a custom location."
+  }
+
+  $hints += "If you only have 'platform-tools', install full Android SDK (platforms + build-tools)."
+  $hints += "Android Studio -> SDK Manager -> install 'Android SDK Platform' and 'Android SDK Build-Tools'."
+
+  return ($hints | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+}
+
+function Throw-AndroidSdkError {
+  param(
+    [hashtable]$Probe,
+    [string]$UserSdkPath
+  )
+
+  $checkedPathsText = if ($Probe.Checked -and $Probe.Checked.Count -gt 0) {
+    ($Probe.Checked | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+  }
+  else {
+    " - no candidate paths were found"
+  }
+
+  $invalidRootsText = if ($Probe.InvalidRoots -and $Probe.InvalidRoots.Count -gt 0) {
+    ($Probe.InvalidRoots | ForEach-Object { " - $_" }) -join [Environment]::NewLine
+  }
+  else {
+    " - none"
+  }
+
+  $hintsText = Format-SdkHints -UserSdkPath $UserSdkPath
+
+  throw @"
+Android SDK was not found or is incomplete.
+Checked candidate paths:
+$checkedPathsText
+Detected incomplete SDK roots:
+$invalidRootsText
+Hints:
+$hintsText
+"@
 }
 
 function Invoke-Checked {
@@ -186,9 +353,10 @@ function Copy-BuildFiles {
 
 $projectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $flutter = Resolve-FlutterExe -UserValue $FlutterExe -ProjectDir $projectDir
-$androidSdk = Resolve-AndroidSdkPath -ProjectDir $projectDir
+$androidSdkProbe = Resolve-AndroidSdkPath -ProjectDir $projectDir -FlutterExe $flutter -UserSdkPath $AndroidSdkPath
+$androidSdk = $androidSdkProbe.Path
 if (-not $androidSdk) {
-  throw "Android SDK was not found. Install Android SDK (Android Studio) or set ANDROID_HOME/ANDROID_SDK_ROOT."
+  Throw-AndroidSdkError -Probe $androidSdkProbe -UserSdkPath $AndroidSdkPath
 }
 
 $env:ANDROID_HOME = $androidSdk
@@ -214,6 +382,10 @@ Write-Host "AndroidSDK:$androidSdk"
 Write-Host "Workspace: $workspaceDir"
 
 Invoke-RobocopyMirror -Source $projectDir -Destination $workspaceDir
+
+$workspaceLocalPropertiesPath = Join-Path $workspaceDir "android\\local.properties"
+$escapedSdk = $androidSdk -replace '\\', '\\'
+Set-Content -Path $workspaceLocalPropertiesPath -Encoding UTF8 -Value "sdk.dir=$escapedSdk"
 
 if (-not $SkipClean) {
   Invoke-Checked -Executable $flutter -Arguments @("clean") -WorkingDirectory $workspaceDir
@@ -258,3 +430,4 @@ if ($aabArtifactDir) {
 if ($OpenOutput) {
   Start-Process explorer.exe $releaseRoot
 }
+
