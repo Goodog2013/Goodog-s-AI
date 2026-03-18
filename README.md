@@ -93,6 +93,13 @@ APK после сборки:
 - Адрес вроде `172.19.0.1` часто является внутренним Docker/WSL IP и может быть недоступен из Wi‑Fi.
 - Проверьте Windows Firewall (входящий порт `1234`; для шлюза — `8088`).
 
+### Рекомендации (LAN IP ПК) 💡
+- Если LM Studio запущен на вашем ПК, в приложении на телефоне используйте **IP ПК в локальной сети**, а не внутренний IP LM/WSL/Docker.
+- Где взять IP ПК: откройте `ipconfig` и используйте `IPv4 Address` активного Wi‑Fi/Ethernet адаптера.
+- Хороший пример: `http://192.168.1.15:1234`
+- Плохие примеры для реального телефона: `http://localhost:1234`, `http://127.0.0.1:1234`, `http://172.19.0.1:1234`
+- Если сменили Wi‑Fi сеть, IP ПК может измениться — обновите URL в настройках приложения.
+
 ### Тарифы и лимиты 📊
 | План | Папки | Чаты | Контекст | Задержка | Автообновление контекста | Приоритет |
 |---|---:|---:|---:|---:|---|---:|
@@ -188,6 +195,13 @@ APK output:
   - `http://192.168.1.15:1234`
 - Addresses like `172.19.0.1` are often Docker/WSL internal and may be unreachable from Wi‑Fi.
 - Check Windows Firewall (inbound `1234`; for gateway `8088`).
+
+### Recommendations (PC LAN IP) 💡
+- If LM Studio is running on your PC, set the phone app URL to your **PC LAN IP**, not an internal LM/WSL/Docker address.
+- How to find your PC IP: run `ipconfig` and use the active adapter `IPv4 Address`.
+- Good example: `http://192.168.1.15:1234`
+- Bad examples on a real phone: `http://localhost:1234`, `http://127.0.0.1:1234`, `http://172.19.0.1:1234`
+- If you switch Wi‑Fi networks, your PC IP may change — update the app URL.
 
 ### Plans & Limits 📊
 | Plan | Folders | Chats | Context | Delay | Auto Context Refresh | Priority |
